@@ -1,0 +1,4 @@
+bme680==2.0.0
+paho-mqtt==2.1.0
+python-dotenv==1.2.2
+smbus2==0.6.1
