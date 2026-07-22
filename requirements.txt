@@ -1,4 +1,7 @@
 bme680==2.0.0
+fastcrc==0.3.6
+lxml==6.1.1
 paho-mqtt==2.1.0
+pymavlink==2.4.49
 python-dotenv==1.2.2
 smbus2==0.6.1

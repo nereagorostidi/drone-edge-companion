@@ -1,0 +1,15 @@
+[Unit]
+Description=Receptor de comandos MQTT-MAVLink (SAR drone)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nerea
+WorkingDirectory=/home/nerea/drone-edge-companion
+ExecStart=/home/nerea/bme680-env/bin/python /home/nerea/drone-edge-companion/receptor.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
