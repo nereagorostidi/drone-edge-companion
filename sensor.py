@@ -19,21 +19,36 @@ disco de la Pi y se envían más tarde, sin perder ningún intervalo.
 Esto materializa el principio EDGE-FIRST del proyecto: el nodo opera de
 forma autónoma y la comunicación con la estación base es oportunista.
 
+Este proceso cubre el DOMINIO AMBIENTAL. Publica en un topic jerárquico
+sar/{dron_id}/ambiental, donde el identificador del dron se lee del .env.
+Cada dominio (vuelo, sistema, deteccion) sigue esta misma plantilla.
+
 Uso:
-    python3 sensor.py              # captura cada 30 s (por defecto)
-    python3 sensor.py -i 5         # captura cada 5 s
-    python3 sensor.py --intervalo 60
+    python3 sensor.py                 # captura cada 30 s (por defecto)
+    python3 sensor.py -i 5            # captura cada 5 s
+    python3 sensor.py --fake          # datos simulados, sin sensor físico
+    python3 sensor.py --fake -i 2     # simulados y rápido, para pruebas
+
+Variables de entorno (.env):
+    DRON_ID     identificador del dron (p. ej. dron01)   [obligatoria]
+    EC2_HOST    IP o dominio del broker MQTT             [obligatoria]
+    MQTT_PORT   puerto MQTT (por defecto 1883)
+    BUFFER_DB   ruta del buffer SQLite
+    LOTE        filas enviadas por ciclo (por defecto 50)
 """
 
 import os
 import time
 import json
+import random
 import sqlite3
 import argparse
-import bme680
 from datetime import datetime
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
+# El módulo bme680 se importa MÁS ABAJO, solo cuando NO se usa --fake.
+# Así el script puede ejecutarse en un equipo sin el sensor (ni la
+# librería) instalados, algo útil para las pruebas en el portátil.
 
 
 # =====================================================================
@@ -47,12 +62,15 @@ load_dotenv()
 # =====================================================================
 #  ARGUMENTOS DE LÍNEA DE COMANDOS
 # =====================================================================
-# Permite parametrizar el intervalo de captura sin editar el código.
-# argparse genera además una ayuda automática con "python3 sensor.py -h".
+# Permite parametrizar el script sin editar el código. argparse genera
+# además una ayuda automática con "python3 sensor.py -h".
 parser = argparse.ArgumentParser(
     description="Lectura y envío MQTT del sensor BME680 con buffer local")
 parser.add_argument("-i", "--intervalo", type=float, default=30.0,
                     help="Segundos entre cada lectura (por defecto: 30)")
+parser.add_argument("--fake", action="store_true",
+                    help="Genera datos simulados en vez de leer el BME680 "
+                         "(para probar sin el sensor físico)")
 args = parser.parse_args()
 
 
@@ -62,15 +80,26 @@ args = parser.parse_args()
 # Todas las variables sensibles y configurables se cargan desde el .env,
 # nunca hardcodeadas en el código. Esto permite versionar el script en
 # público sin exponer credenciales ni infraestructura.
-EC2_HOST = os.getenv("EC2_HOST")                              # IP o dominio del broker
-PORT = int(os.getenv("MQTT_PORT", 1883))                      # Puerto MQTT
-TOPIC = os.getenv("MQTT_TOPIC")                               # Topic de publicación
-DB = os.getenv("BUFFER_DB", "/home/nerea/drone-edge-companion/buffer.db")
-LOTE = int(os.getenv("LOTE", 50))                             # Filas por ciclo
+DOMINIO = "ambiental"                                        # dominio de este proceso
+DRON_ID = os.getenv("DRON_ID")                               # identificador del dron
+EC2_HOST = os.getenv("EC2_HOST")                             # IP o dominio del broker
+PORT = int(os.getenv("MQTT_PORT", 1883))                     # Puerto MQTT
+DB = os.getenv("BUFFER_SENSOR", f"./{DOMINIO}.db")
+LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
+
+# El topic y el client_id se CONSTRUYEN a partir del identificador del dron,
+# no se escriben a mano. Así el mismo código sirve para cualquier unidad:
+# basta con cambiar DRON_ID en su .env.
+#   Topic jerárquico:   sar/{dron_id}/{dominio}
+#   client_id ÚNICO:    {dron_id}-{dominio}
+# El client_id debe ser único por proceso: si dos clientes se conectan al
+# broker con el mismo id, Mosquitto los va expulsando en un bucle sin fin.
+TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
 
 # Validación temprana: si falta alguna variable obligatoria, el script
 # falla con un mensaje claro en lugar de con errores crípticos más tarde.
-required = {"EC2_HOST": EC2_HOST, "MQTT_TOPIC": TOPIC}
+required = {"DRON_ID": DRON_ID, "EC2_HOST": EC2_HOST}
 missing = [k for k, v in required.items() if not v]
 if missing:
     raise RuntimeError(f"Faltan variables de entorno: {', '.join(missing)}")
@@ -96,25 +125,72 @@ db.commit()
 
 
 # =====================================================================
-#  INICIALIZACIÓN DEL SENSOR BME680
+#  ORIGEN DE LOS DATOS — SENSOR REAL o MODO FAKE
 # =====================================================================
-# Dirección I2C 0x76 (SDO conectado a GND). Si el sensor apareciera en
-# 0x77 con "i2cdetect -y 1", cambiar a bme680.I2C_ADDR_SECONDARY.
-sensor = bme680.BME680(bme680.I2C_ADDR_PRIMARY)
+# El origen del dato se decide UNA sola vez aquí. En modo normal se
+# inicializa el BME680; en modo --fake ni se importa la librería, para
+# poder ejecutar el script en un equipo que no tenga el sensor.
+if args.fake:
+    print("MODO FAKE: se generan datos simulados, no se lee el BME680.")
+    # Estado inicial de la simulación. Se parte de valores plausibles y en
+    # cada lectura se les suma una pequeña variación (ver datos_simulados).
+    _sim = {"temp": 22.0, "hum": 48.0, "pres": 1013.0}
+else:
+    import bme680
+    # Dirección I2C 0x76 (SDO conectado a GND). Si el sensor apareciera en
+    # 0x77 con "i2cdetect -y 1", cambiar a bme680.I2C_ADDR_SECONDARY.
+    sensor = bme680.BME680(bme680.I2C_ADDR_PRIMARY)
 
-# Sobremuestreo (oversampling): promedia varias medidas internas para
-# reducir el ruido. Más oversampling = medida más estable pero más lenta.
-sensor.set_humidity_oversample(bme680.OS_2X)
-sensor.set_pressure_oversample(bme680.OS_4X)
-sensor.set_temperature_oversample(bme680.OS_8X)
-# Filtro IIR: suaviza picos bruscos y transitorios en las lecturas.
-sensor.set_filter(bme680.FILTER_SIZE_3)
+    # Sobremuestreo (oversampling): promedia varias medidas internas para
+    # reducir el ruido. Más oversampling = medida más estable pero más lenta.
+    sensor.set_humidity_oversample(bme680.OS_2X)
+    sensor.set_pressure_oversample(bme680.OS_4X)
+    sensor.set_temperature_oversample(bme680.OS_8X)
+    # Filtro IIR: suaviza picos bruscos y transitorios en las lecturas.
+    sensor.set_filter(bme680.FILTER_SIZE_3)
+
+
+def _acota(valor, minimo, maximo):
+    """Mantiene un valor dentro de un rango [minimo, maximo]."""
+    return max(minimo, min(maximo, valor))
+
+
+def datos_simulados():
+    """Genera una medida ambiental plausible con deriva suave.
+
+    En vez de valores al azar independientes en cada lectura, se parte del
+    valor anterior y se le suma una pequeña variación. Así la serie simulada
+    se parece a una señal real (cambia poco a poco) y sirve para validar el
+    flujo completo —buffer, MQTT, topic, client_id— sin el sensor físico.
+    """
+    _sim["temp"] = _acota(_sim["temp"] + random.uniform(-0.3, 0.3), 15.0, 30.0)
+    _sim["hum"] = _acota(_sim["hum"] + random.uniform(-0.8, 0.8), 30.0, 70.0)
+    _sim["pres"] = _acota(_sim["pres"] + random.uniform(-0.2, 0.2), 1000.0, 1025.0)
+    return (round(_sim["temp"], 2), round(_sim["hum"], 2), round(_sim["pres"], 2))
+
+
+def leer_medida():
+    """Devuelve (temp, hum, pres), o None si aún no hay una medida válida.
+
+    Encapsula el origen del dato: en modo normal lee el BME680; en modo
+    --fake devuelve datos simulados. El resto del script no necesita saber
+    de dónde viene la medida.
+    """
+    if args.fake:
+        return datos_simulados()
+    if sensor.get_sensor_data():   # True cuando hay una medida válida lista
+        return (round(sensor.data.temperature, 2),
+                round(sensor.data.humidity, 2),
+                round(sensor.data.pressure, 2))
+    return None
 
 
 # =====================================================================
 #  CLIENTE MQTT
 # =====================================================================
-client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+# El client_id identifica este proceso ante el broker de forma única.
+client = mqtt.Client(client_id=CLIENT_ID,
+                     callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
 # Reconexión automática: si se cae la red, la librería reintenta sola,
 # esperando entre 1 y 30 s de forma progresiva. No hay que hacer nada
@@ -123,10 +199,11 @@ client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 # connect_async NO bloquea aunque el broker no esté disponible al arrancar.
 # Combinado con loop_start(), la gestión de red corre en segundo plano.
-print(f"Conectando al bróker en {EC2_HOST}...")
+print(f"Conectando al broker en {EC2_HOST} como '{CLIENT_ID}'...")
 client.connect_async(EC2_HOST, PORT, 60)
 client.loop_start()
 
+print(f"Dominio '{DOMINIO}' -> topic '{TOPIC}'")
 print(f"Captura cada {args.intervalo}s con buffer local. (Ctrl+C para salir)")
 
 
@@ -134,21 +211,21 @@ print(f"Captura cada {args.intervalo}s con buffer local. (Ctrl+C para salir)")
 #  FUNCIÓN: guardar() — CAPTURA (siempre activa)
 # =====================================================================
 def guardar():
-    """Lee el sensor y almacena la medida en el buffer local.
+    """Lee el origen de datos y almacena la medida en el buffer local.
 
     Esto ocurre SIEMPRE, haya red o no. La hora se toma en el momento
     exacto de la captura (no del envío) y en formato ISO 8601 con zona
     horaria, para que un dato que se envíe con retraso se guarde luego
     con su instante real y no con el de la reconexión.
     """
-    if sensor.get_sensor_data():   # True cuando hay una medida válida lista
-        db.execute(
-            "INSERT INTO lecturas (ts, temp, hum, pres) VALUES (?,?,?,?)",
-            (datetime.now().astimezone().isoformat(),
-             round(sensor.data.temperature, 2),
-             round(sensor.data.humidity, 2),
-             round(sensor.data.pressure, 2)))
-        db.commit()
+    medida = leer_medida()
+    if medida is None:     # aún no hay lectura válida del sensor
+        return
+    temp, hum, pres = medida
+    db.execute(
+        "INSERT INTO lecturas (ts, temp, hum, pres) VALUES (?,?,?,?)",
+        (datetime.now().astimezone().isoformat(), temp, hum, pres))
+    db.commit()
 
 
 # =====================================================================
@@ -173,8 +250,7 @@ def reenviar():
         "WHERE enviado=0 ORDER BY id LIMIT ?", (LOTE,)).fetchall()
 
     for id_, ts, temp, hum, pres in filas:
-        # El JSON mantiene el mismo formato que espera el servidor EC2,
-        # por lo que NO hay que modificar el puente del EC2.
+        # El JSON mantiene el mismo formato que espera el puente del EC2.
         payload = json.dumps({
             "temperatura": temp,
             "humedad": hum,
@@ -188,7 +264,7 @@ def reenviar():
                 # Confirmado: se marca como enviado de forma definitiva.
                 db.execute("UPDATE lecturas SET enviado=1 WHERE id=?", (id_,))
                 db.commit()
-                print(f"Enviado: {payload}")
+                print(f"Enviado [{TOPIC}]: {payload}")
             else:
                 # No confirmado: se para y se reintenta en el próximo ciclo.
                 break
