@@ -1,0 +1,16 @@
+[Unit]
+Description=Captura y envio MQTT de la telemetria de vuelo (SAR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nerea
+WorkingDirectory=/home/nerea/drone-edge-companion
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/nerea/bme680-env/bin/python -u /home/nerea/drone-edge-companion/vuelo.py -i 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
