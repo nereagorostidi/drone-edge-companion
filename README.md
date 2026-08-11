@@ -151,6 +151,11 @@ El vídeo anotado se guarda siempre en `results/videos/{DRON_ID}_{fuente}_{fecha
 
 Para que las alertas lleven posición, `vuelo.py` debe estar en marcha en la misma carpeta (comparten `posicion_actual.json`); si no lo está, la alerta se envía igualmente pero sin coordenadas.
 
+Por defecto (`--overlay true`) esa foto lleva superpuestas las coordenadas del dron y la fecha/hora de la detección; con `--overlay false` se guarda el frame tal cual. Solo afecta a la foto — el vídeo anotado y la ventana de preview nunca llevan esta marca:
+```bash
+python deteccion.py samples/vuelo1.mp4 --overlay false   # fotos sin coordenadas/fecha superpuestas
+```
+
 En la Raspberry Pi, en vez de un vídeo grabado se puede analizar en directo desde la cámara con `--camera` (mutuamente excluyente con `video_path`):
 ```bash
 python deteccion.py --camera 0                      # cámara por índice (la primera detectada)

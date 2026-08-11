@@ -33,7 +33,11 @@ Cada vez que se envía una alerta (respetando el --anti-spam) se guarda
 además el frame anotado de esa detección como JPEG en:
     results/fotos/{dron_id}_{fecha}.jpg
 El nombre de ese fichero viaja también dentro del JSON de la alerta MQTT
-(campo 'foto'), para poder relacionar cada alerta con su imagen.
+(campo 'foto'), para poder relacionar cada alerta con su imagen. Con
+--overlay (por defecto true) esa foto lleva además superpuestas las
+coordenadas del dron y la fecha/hora de la detección; con --overlay false
+se guarda el frame tal cual, sin esa marca. El vídeo anotado y el preview
+nunca llevan overlay, solo la foto.
 
 A cada alerta se le adjunta SIEMPRE el bloque 'dron' con la posición del
 dron (la ubicación aproximada de la persona), leída de posicion_actual.json.
@@ -48,6 +52,7 @@ Uso:
     python3 deteccion.py --camera 0                  # cámara en vivo (índice 0) en vez de un vídeo
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
     python3 deteccion.py --camera 0 --preview false  # cámara en vivo, sin ventana (para systemd)
+    python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
     python3 deteccion.py -h                           # ayuda con los valores por defecto
 
 Variables de entorno (.env) — necesarias solo con --mqtt true:
@@ -110,6 +115,8 @@ parser.add_argument('--preview', type=_str2bool, default=True,
                      help='Mostrar la ventana de vista previa (true/false). El video de salida en output/ se genera SIEMPRE, se muestre o no el preview')
 parser.add_argument('--anti-spam', type=float, default=5.0,
                      help='Segundos minimos entre envios de alertas por MQTT, para no saturar el topic con la misma persona en frames seguidos')
+parser.add_argument('--overlay', type=_str2bool, default=True,
+                     help='Añadir a la foto guardada (results/fotos/) la posicion del dron y la fecha/hora de la deteccion (true/false). No afecta al video anotado ni al preview')
 args = parser.parse_args()
 
 
@@ -243,17 +250,47 @@ def guardar_deteccion(ts, payload):
     db.commit()
 
 
-def guardar_foto(frame):
-    """Guarda el frame anotado donde se ha detectado una persona.
+def _dibujar_overlay(frame, pos, ts):
+    """Devuelve una copia del frame con las coordenadas del dron y la
+    fecha/hora de la detección superpuestas (activado con --overlay).
+
+    Solo afecta a la foto que se guarda en results/fotos/; el vídeo
+    anotado y la ventana de preview no llevan esta marca.
+    """
+    frame = frame.copy()
+    if pos and pos.get("lat") is not None and pos.get("lon") is not None:
+        alt = pos.get("alt_rel")
+        alt_txt = f"{alt:.1f}m" if alt is not None else "NA"
+        linea_coords = f"lat {pos['lat']:.6f}  lon {pos['lon']:.6f}  alt {alt_txt}"
+    else:
+        linea_coords = "lat/lon: sin posicion"
+    lineas = [ts.strftime("%Y-%m-%d %H:%M:%S"), linea_coords]
+
+    # Texto negro grueso debajo y blanco fino encima, para que se lea sobre
+    # cualquier fondo del vídeo. Las líneas se apilan desde el borde inferior.
+    y = frame.shape[0] - 15
+    for texto in reversed(lineas):
+        cv2.putText(frame, texto, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, texto, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        y -= 28
+    return frame
+
+
+def guardar_foto(frame, pos, ts):
+    """Guarda el frame donde se ha detectado una persona.
 
     Se llama solo cuando se supera el antispam (mismo ritmo que las
     alertas), así que genera como mucho una foto por alerta enviada, no
-    una por frame analizado. El nombre incluye el DRON_ID y la fecha, y
-    se adjunta a cada alerta MQTT de ese frame para poder relacionarlas.
+    una por frame analizado. Con --overlay (activado por defecto), la
+    foto lleva superpuestas las coordenadas del dron y la fecha/hora. El
+    nombre incluye el DRON_ID y la fecha, y se adjunta a cada alerta MQTT
+    de ese frame para poder relacionarlas.
     """
+    if args.overlay:
+        frame = _dibujar_overlay(frame, pos, ts)
     fotos_dir = os.path.join('results', 'fotos')
     os.makedirs(fotos_dir, exist_ok=True)
-    nombre = f"{DRON_ID or 'sindron'}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+    nombre = f"{DRON_ID or 'sindron'}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
     cv2.imwrite(os.path.join(fotos_dir, nombre), frame)
     return nombre
 
@@ -279,33 +316,30 @@ def reenviar():
             break
 
 
-def procesar_detecciones(r, foto_nombre):
+def procesar_detecciones(r, foto_nombre, ts, pos):
     """Convierte las cajas detectadas en un frame en alertas y las encola.
 
-    Emite una alerta por persona, todas con el mismo 'foto' (el frame ya
-    se guardó una única vez para esta llamada). El control de frecuencia
+    Emite una alerta por persona, todas con el mismo 'foto' y la misma
+    posición (el frame y la posición del dron ya se leyeron una única vez
+    para esta llamada, en el bucle principal). El control de frecuencia
     (anti-spam) lo aplica el bucle principal, para no saturar el topic
     con la misma persona en frames consecutivos.
     """
     if r.boxes is None or len(r.boxes) == 0:
         return
 
-    ts = datetime.now().astimezone().isoformat()
+    ts_iso = ts.isoformat()
 
     # Posición del dron en el instante de la detección: es la ubicación
-    # (aproximada, Nivel 0) de la persona localizada. Se lee del fichero
-    # posicion_actual.json que escribe vuelo.py y se adjunta SIEMPRE al
+    # (aproximada, Nivel 0) de la persona localizada, leída de
+    # posicion_actual.json (que escribe vuelo.py) y adjuntada SIEMPRE al
     # mensaje (con valores si está disponible, o nula si no lo está).
-    pos = leer_posicion()
     if pos:
-        _posicion_fresca(pos)
         dron = {"lat": pos.get("lat"),
                 "lon": pos.get("lon"),
                 "alt_rel": pos.get("alt_rel")}
     else:
         dron = None
-        print("  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
-              "¿Está vuelo.py en marcha en la misma carpeta?)")
 
     alto, ancho = r.orig_shape                 # resolución del frame original
     cajas = r.boxes.xywh.cpu().numpy()         # [N, 4] -> cx, cy, w, h (píxeles)
@@ -321,9 +355,9 @@ def procesar_detecciones(r, foto_nombre):
             "dron": dron,
             # Nombre del JPEG guardado en results/fotos/ con este frame.
             "foto": foto_nombre,
-            "timestamp": ts,
+            "timestamp": ts_iso,
         }
-        guardar_deteccion(ts, json.dumps(mensaje))
+        guardar_deteccion(ts_iso, json.dumps(mensaje))
 
 
 # =====================================================================
@@ -370,8 +404,15 @@ try:
         if MQTT_ON and r.boxes is not None and len(r.boxes) > 0:
             ahora = time.monotonic()
             if ahora - ultimo_envio >= args.anti_spam:
-                foto_nombre = guardar_foto(annotated_frame)
-                procesar_detecciones(r, foto_nombre)
+                ts = datetime.now().astimezone()
+                pos = leer_posicion()
+                if pos:
+                    _posicion_fresca(pos)
+                else:
+                    print("  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
+                          "¿Está vuelo.py en marcha en la misma carpeta?)")
+                foto_nombre = guardar_foto(annotated_frame, pos, ts)
+                procesar_detecciones(r, foto_nombre, ts, pos)
                 ultimo_envio = ahora
         # Se intenta vaciar el buffer en cada frame (barato si está vacío).
         if MQTT_ON:
