@@ -3,14 +3,14 @@ Nodo edge del sistema UAV de Búsqueda y Rescate (SAR) del TFG.
 Corre en una Raspberry Pi 5 y agrupa varios procesos independientes ("dominios"), cada uno con su propia captura, buffer local SQLite y publicación MQTT hacia el broker en AWS EC2, más un receptor de comandos que traduce órdenes MQTT a MAVLink para el autopiloto.
 
 ## Dominios
-Cada dominio es un script independiente que sigue la misma plantilla store-and-forward (captura → buffer SQLite → reenvío MQTT oportunista) y publica en su propio topic `sar/{dron_id}/{dominio}`:
+Cada dominio es un script independiente que sigue la misma plantilla store-and-forward (captura → buffer SQLite → reenvío MQTT oportunista) y publica en su propio topic `dronsar/{dron_id}/{dominio}`:
 
 | Dominio | Script | Publica en | Descripción |
 |---|---|---|---|
-| `ambiental` | `sensor.py` | `sar/{dron_id}/ambiental` | Lectura del BME680 (temperatura, humedad, presión) |
-| `sistema` | `sistema.py` | `sar/{dron_id}/sistema` | Estado del nodo edge: CPU, temperatura, RAM, disco, throttling, uptime |
-| `vuelo` | `vuelo.py` | `sar/{dron_id}/vuelo` | Telemetría de vuelo (posición, actitud, batería, GPS, modo). Además escribe `posicion_actual.json` con la última posición conocida |
-| `deteccion` | `deteccion.py` | `sar/{dron_id}/deteccion` | Detección de personas con YOLO sobre un vídeo o cámara en vivo (`--camera`); adjunta a cada alerta la posición del dron leída de `posicion_actual.json` y el nombre de la foto guardada de esa detección |
+| `ambiental` | `sensor.py` | `dronsar/{dron_id}/ambiental` | Lectura del BME680 (temperatura, humedad, presión) |
+| `sistema` | `sistema.py` | `dronsar/{dron_id}/sistema` | Estado del nodo edge: CPU, temperatura, RAM, disco, throttling, uptime |
+| `vuelo` | `vuelo.py` | `dronsar/{dron_id}/vuelo` | Telemetría de vuelo (posición, actitud, batería, GPS, modo). Además escribe `posicion_actual.json` con la última posición conocida |
+| `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion` | Detección de personas con YOLO sobre un vídeo o cámara en vivo (`--camera`); adjunta a cada alerta la posición del dron leída de `posicion_actual.json` y el nombre de la foto guardada de esa detección |
 
 Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se suscribe al topic de comandos y los traduce a MAVLink (ver [Flujo de comandos](#flujo-de-comandos)).
 
@@ -59,7 +59,16 @@ Botón (control.gorostiditfg.com) → HTTP → api.py (EC2)
 
 `receptor.py` se suscribe al topic `dronsar/<DRONE_ID>/comandos` y traduce cada comando recibido mediante un diccionario de acciones MAVLink. No se comunica directamente con `api.py`: ambos son clientes independientes del broker. Tampoco da órdenes a Mission Planner, sino al autopiloto; Mission Planner, conectado al mismo autopiloto, refleja lo que ocurre.
 
-> Nota: `receptor.py` usa sus propias variables de entorno (`DRONE_ID`, `MQTT_BROKER`) y un esquema de topic distinto (`dronsar/...`) al del resto de dominios (`DRON_ID`, `EC2_HOST`, `sar/...`). Son procesos independientes, así que no hace falta que coincidan, pero conviene mantener `DRONE_ID`/`DRON_ID` con el mismo valor en el `.env`.
+> Nota: `receptor.py` usa sus propias variables de entorno (`DRONE_ID`, `MQTT_BROKER`) en vez de las del resto de dominios (`DRON_ID`, `EC2_HOST`), aunque todos comparten ya el mismo prefijo de topic `dronsar/...`. Son procesos independientes técnicamente, pero **`DRONE_ID` y `DRON_ID` deben tener el mismo valor** en el `.env`: el panel de control ahora deja elegir el dron desde un desplegable (`dron-01` / `dron-02`, validado en `api.py` contra `DRONES_VALIDOS`), y ese valor va literalmente en el topic. Si `DRONE_ID` no coincide con `DRON_ID` (p. ej. uno en `dron-02` y el otro con el valor por defecto `dron-01`), los comandos de vuelo se publican en un topic que `receptor.py` no escucha y se pierden sin ningún error visible.
+
+## Flujo de configuración
+Además de comandos de vuelo, el panel de control puede reconfigurar en caliente tres dominios, con el mismo esquema `dronsar/...` y el mismo formato de payload (`command`/`params`/`drone_id`/`command_id`/`timestamp`) que usa `receptor.py` para comandos — lo publica `api.py` (ver `COMANDOS_CONFIG`). Cada script se suscribe a su propio topic de configuración y aplica el cambio sin reiniciar:
+
+| Dominio | Script | Se suscribe a | `command` | `params` | Efecto |
+|---|---|---|---|---|---|
+| `sensor` | `sensor.py` | `dronsar/{dron_id}/sensor/config` | `set_sensor_interval` | `{"interval_seconds": N}` | Cambia el intervalo de captura del BME680 (segundos) |
+| `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `set_video_throttle` | `{"throttle_ms": N}` | Cambia el anti-spam de alertas de vídeo (el valor llega en milisegundos y se convierte a segundos) |
+| `sistema` | `sistema.py` | `dronsar/{dron_id}/sistema/config` | `shutdown` | `{}` | Apaga la Raspberry Pi (`sudo shutdown -h now`) |
 
 ## Requisitos
 - Raspberry Pi 5 con Raspberry Pi OS (Bookworm) y fuente oficial de 27 W (5 V / 5 A)
@@ -102,7 +111,7 @@ cp .env.example .env   # edita con tus credenciales
 ## Variables de entorno
 | Variable | Usado por | Descripción |
 |---|---|---|
-| `DRON_ID` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py` | Identificador del dron; forma el topic `sar/{dron_id}/{dominio}` |
+| `DRON_ID` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py` | Identificador del dron; forma el topic `dronsar/{dron_id}/{dominio}` |
 | `EC2_HOST` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py` | IP elástica o dominio del servidor con el broker |
 | `MQTT_PORT` | todos | Puerto del broker (1883) |
 | `LOTE` | todos los dominios | Filas del buffer reenviadas por ciclo (por defecto 50) |
@@ -112,11 +121,11 @@ cp .env.example .env   # edita con tus credenciales
 | `BUFFER_DB` | `deteccion.py` | Ruta del buffer SQLite del dominio `deteccion` (por defecto `./deteccion.db`) |
 | `POS_FILE` | `vuelo.py`, `deteccion.py` | Ruta del fichero de posición compartido (por defecto `./posicion_actual.json`) |
 | `MQTT_TOPIC` | — | Legado del dominio único original; los dominios actuales construyen el topic a partir de `DRON_ID` |
-| `MQTT_BROKER` | `receptor.py` | IP elástica o dominio del servidor con el broker |
-| `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos` |
+| `MQTT_BROKER` | `receptor.py` | IP elástica o dominio del servidor con el broker; debe ser el mismo valor que `EC2_HOST` |
+| `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos`. Debe ser el mismo valor que `DRON_ID`, y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
 | `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink (`udpin:0.0.0.0:14550` contra el SITL) |
 
-El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente.
+El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente. Esto incluye `DRONE_ID`/`DRON_ID`: si no coinciden entre sí (y con el valor elegido en el desplegable del panel de control), el mensaje se publica pero ningún proceso de este Pi lo recibe.
 
 ## Ejecución manual
 Los scripts de dominio y `receptor.py` se ejecutan en paralelo y son independientes entre sí.
@@ -174,7 +183,7 @@ Al arrancar, `receptor.py` debe mostrar el autopiloto conectado y la suscripció
 
 Para comprobar desde otra máquina que la telemetría de un dominio llega al broker:
 ```bash
-mosquitto_sub -h <EC2_HOST> -t 'sar/<DRON_ID>/<dominio>' -v
+mosquitto_sub -h <EC2_HOST> -t 'dronsar/<DRON_ID>/<dominio>' -v
 ```
 
 ## Ejecución como servicio

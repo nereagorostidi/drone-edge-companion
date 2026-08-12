@@ -9,7 +9,7 @@
 Este script ejecuta la detección de personas con YOLO sobre un vídeo o
 sobre una cámara en vivo (igual que antes: genera el vídeo anotado de
 salida y la ventana de vista previa) y, ADEMÁS, cuando localiza una
-persona publica una alerta en sar/{dron_id}/deteccion con la misma
+persona publica una alerta en dronsar/{dron_id}/deteccion con la misma
 lógica que el resto de colectores (buffer local SQLite + reenvío MQTT
 "store-and-forward").
 
@@ -137,8 +137,17 @@ DB = os.getenv("BUFFER_DB", os.path.join(BASE_DIR, f"{DOMINIO}.db"))
 # Mismo fichero de posición que escribe vuelo.py.
 POS_FILE = os.getenv("POS_FILE", os.path.join(BASE_DIR, "posicion_actual.json"))
 
-TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
+
+# Topic de configuración remota (panel de control -> este script), con el
+# mismo esquema "dronsar/..." que usa receptor.py para comandos.
+CONFIG_TOPIC = f"dronsar/{DRON_ID}/deteccion/config"
+
+# Anti-spam EN USO (segundos mínimos entre alertas MQTT). Arranca con el
+# valor de --anti-spam, pero se puede actualizar en caliente desde el panel
+# de control (ver on_message), igual que el intervalo en sensor.py.
+anti_spam_actual = args.anti_spam
 
 # El envío MQTT se controla con el parámetro --mqtt (por defecto true).
 # Con --mqtt false, el script solo hace detección y preview.
@@ -203,8 +212,47 @@ if MQTT_ON:
         enviado INTEGER DEFAULT 0)""")
     db.commit()
 
+    def on_connect(client, userdata, flags, reason_code, properties):
+        """Al conectar (o reconectar), nos suscribimos al topic de configuración."""
+        client.subscribe(CONFIG_TOPIC, qos=1)
+        print(f"Suscrito a '{CONFIG_TOPIC}'")
+
+    def on_message(client, userdata, msg):
+        """Actualiza el throttle de vídeo al recibir un comando de configuración.
+
+        Formato del payload (lo publica api.py, ver COMANDOS_CONFIG):
+            {"command": "set_video_throttle", "params": {"throttle_ms": N}, ...}
+        throttle_ms llega en MILISEGUNDOS; anti_spam_actual se guarda en segundos
+        (es lo que compara el bucle principal contra time.monotonic()).
+        """
+        global anti_spam_actual
+        try:
+            orden = json.loads(msg.payload)
+        except json.JSONDecodeError:
+            print(f"Mensaje recibido en '{CONFIG_TOPIC}' que no es JSON válido; se ignora.")
+            return
+
+        command = orden.get("command")
+        cmd_id = orden.get("command_id", "?")
+        print(f"Comando de configuración recibido [{cmd_id}]: {command}")
+
+        if command != "set_video_throttle":
+            print(f"  -> Comando desconocido '{command}' en este topic; se ignora.")
+            return
+
+        try:
+            throttle_ms = float(orden["params"]["throttle_ms"])
+        except (KeyError, TypeError, ValueError):
+            print("  -> 'params.throttle_ms' ausente o inválido; se ignora.")
+            return
+
+        anti_spam_actual = throttle_ms / 1000.0
+        print(f"  -> Anti-spam de alertas actualizado a {anti_spam_actual}s ({throttle_ms} ms)")
+
     client = mqtt.Client(client_id=CLIENT_ID,
                          callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_connect
+    client.on_message = on_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(EC2_HOST, PORT, 60)
     client.loop_start()
@@ -266,12 +314,12 @@ def _dibujar_overlay(frame, pos, ts):
         linea_coords = "lat/lon: sin posicion"
     lineas = [ts.strftime("%Y-%m-%d %H:%M:%S"), linea_coords]
 
-    # Texto negro grueso debajo y blanco fino encima, para que se lea sobre
-    # cualquier fondo del vídeo. Las líneas se apilan desde el borde inferior.
+    # Un único color (amarillo), sin contorno superpuesto: se lee bien sobre
+    # el verde/tierra/gris típico de las fotos aéreas. Las líneas se apilan
+    # desde el borde inferior.
     y = frame.shape[0] - 15
     for texto in reversed(lineas):
-        cv2.putText(frame, texto, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, texto, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, texto, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
         y -= 28
     return frame
 
@@ -403,7 +451,7 @@ try:
         # ----- NUEVO: detección -> alerta MQTT (con anti-spam) -----
         if MQTT_ON and r.boxes is not None and len(r.boxes) > 0:
             ahora = time.monotonic()
-            if ahora - ultimo_envio >= args.anti_spam:
+            if ahora - ultimo_envio >= anti_spam_actual:
                 ts = datetime.now().astimezone()
                 pos = leer_posicion()
                 if pos:

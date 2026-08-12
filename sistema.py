@@ -15,7 +15,7 @@ guarda en un buffer local SQLite y reenvía por MQTT con la lógica
 "store-and-forward". Lo único que cambia es el origen de los datos, el
 esquema de la tabla y el dominio.
 
-Este proceso cubre el DOMINIO SISTEMA. Publica en sar/{dron_id}/sistema,
+Este proceso cubre el DOMINIO SISTEMA. Publica en dronsar/{dron_id}/sistema,
 con el identificador del dron leído del .env.
 
 Origen de los datos:
@@ -77,10 +77,14 @@ DB = os.getenv("BUFFER_SISTEMA", f"./{DOMINIO}.db")
 LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
 
 # El topic y el client_id se construyen a partir del identificador del dron.
-#   Topic jerárquico:   sar/{dron_id}/{dominio}
+#   Topic jerárquico:   dronsar/{dron_id}/{dominio}
 #   client_id ÚNICO:    {dron_id}-{dominio}
-TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
+
+# Topic de configuración remota (panel de control -> este script), con el
+# mismo esquema "dronsar/..." que usa receptor.py para comandos.
+CONFIG_TOPIC = f"dronsar/{DRON_ID}/sistema/config"
 
 # Validación temprana de las variables obligatorias.
 required = {"DRON_ID": DRON_ID, "EC2_HOST": EC2_HOST}
@@ -176,10 +180,45 @@ def leer_medida():
 
 
 # =====================================================================
+#  CONFIGURACIÓN REMOTA (panel de control -> este script)
+# =====================================================================
+def on_connect(client, userdata, flags, reason_code, properties):
+    """Al conectar (o reconectar), nos suscribimos al topic de configuración."""
+    client.subscribe(CONFIG_TOPIC, qos=1)
+    print(f"Suscrito a '{CONFIG_TOPIC}'")
+
+
+def on_message(client, userdata, msg):
+    """Apaga la Raspberry Pi al recibir un comando de apagado por MQTT.
+
+    Formato del payload (lo publica api.py, ver COMANDOS_CONFIG):
+        {"command": "shutdown", "params": {}, ...}
+    """
+    try:
+        orden = json.loads(msg.payload)
+    except json.JSONDecodeError:
+        print(f"Mensaje recibido en '{CONFIG_TOPIC}' que no es JSON válido; se ignora.")
+        return
+
+    command = orden.get("command")
+    cmd_id = orden.get("command_id", "?")
+    print(f"Comando de configuración recibido [{cmd_id}]: {command}")
+
+    if command != "shutdown":
+        print(f"  -> Comando desconocido '{command}' en este topic; se ignora.")
+        return
+
+    print("  -> Apagando la Raspberry Pi...")
+    subprocess.run(["sudo", "shutdown", "-h", "now"], check=False)
+
+
+# =====================================================================
 #  CLIENTE MQTT
 # =====================================================================
 client = mqtt.Client(client_id=CLIENT_ID,
                      callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+client.on_connect = on_connect
+client.on_message = on_message
 client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 print(f"Conectando al broker en {EC2_HOST} como '{CLIENT_ID}'...")
