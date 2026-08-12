@@ -7,7 +7,7 @@
 =====================================================================
 
 Este script publica la telemetría de vuelo (posición, actitud, batería,
-GPS y modo) en sar/{dron_id}/vuelo y, además, escribe en cada ciclo el
+GPS y modo) en dronsar/{dron_id}/vuelo y, además, escribe en cada ciclo el
 fichero posicion_actual.json con la última posición conocida del dron,
 que es lo que el proceso de detección (deteccion.py) leerá para adjuntar
 la posición a cada alerta de persona.
@@ -81,7 +81,7 @@ LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
 POS_FILE = os.getenv("POS_FILE", "./posicion_actual.json")
 
 # El topic y el client_id se construyen a partir del identificador del dron.
-TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
 
 # Validación temprana de las variables obligatorias.
