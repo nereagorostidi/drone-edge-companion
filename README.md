@@ -124,6 +124,7 @@ cp .env.example .env   # edita con tus credenciales
 | `MQTT_BROKER` | `receptor.py` | IP elástica o dominio del servidor con el broker; debe ser el mismo valor que `EC2_HOST` |
 | `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos`. Debe ser el mismo valor que `DRON_ID`, y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
 | `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink (`udpin:0.0.0.0:14550` contra el SITL) |
+| `MAVLINK_CONN_VUELO` | `vuelo.py` | Cadena de conexión MAVLink para leer telemetría (por defecto `udpin:0.0.0.0:14552`; debe ser un puerto distinto al de `MAVLINK_CONN`). No se usa con `--fake` |
 
 El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente. Esto incluye `DRONE_ID`/`DRON_ID`: si no coinciden entre sí (y con el valor elegido en el desplegable del panel de control), el mensaje se publica pero ningún proceso de este Pi lo recibe.
 
@@ -142,11 +143,13 @@ source /home/nerea/bme680-env/bin/activate
 python sistema.py -i 10
 ```
 
-Telemetría de vuelo (datos simulados hasta que el Pixhawk esté montado):
+Telemetría de vuelo (por defecto lee MAVLink real; con `--fake`, datos simulados):
 ```bash
 source /home/nerea/bme680-env/bin/activate
-python vuelo.py -i 1
+python vuelo.py -i 1              # MAVLink real (Pixhawk o Mission Planner en SITL)
+python vuelo.py -i 1 --fake       # datos simulados, sin autopiloto
 ```
+Para leer del SITL, Mission Planner necesita reenviar por UDP a la Pi en un puerto propio para `vuelo.py` (`SerialOutput → UDP Outbound → puerto 14552`, con *Write access* activado), además del que ya usa `receptor.py` — son dos flujos UDP independientes, uno por proceso.
 
 Detección de personas sobre un vídeo (requiere `weights/best.pt`):
 ```bash
