@@ -8,7 +8,9 @@ Type=simple
 User=nerea
 WorkingDirectory=/home/nerea/drone-edge-companion
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/nerea/bme680-env/bin/python -u /home/nerea/drone-edge-companion/vuelo.py -i 1
+# --fake: quitar este flag en cuanto el Pixhawk (o el SITL) esté disponible;
+# sin él, vuelo.py se queda esperando el heartbeat MAVLink indefinidamente.
+ExecStart=/home/nerea/bme680-env/bin/python -u /home/nerea/drone-edge-companion/vuelo.py -i 1 --fake
 Restart=always
 RestartSec=5
 
