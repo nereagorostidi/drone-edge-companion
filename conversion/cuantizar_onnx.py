@@ -19,10 +19,10 @@ Cada vez que se regenere weights/best.onnx (con exportar_onnx.py tras
 un reentrenamiento), vuelve a ejecutar este script para cuantizar la
 version nueva.
 
-Uso:
-    python3 cuantizar_onnx.py                        # weights/best.onnx -> weights/best.int8.onnx
-    python3 cuantizar_onnx.py --entrada otro.onnx     # cuantizar otro fichero
-    python3 cuantizar_onnx.py -h                      # ayuda con los valores por defecto
+Uso (desde la raíz del repo):
+    python3 conversion/cuantizar_onnx.py                        # weights/best.onnx -> weights/best.int8.onnx
+    python3 conversion/cuantizar_onnx.py --entrada otro.onnx     # cuantizar otro fichero
+    python3 conversion/cuantizar_onnx.py -h                      # ayuda con los valores por defecto
 """
 
 import argparse
@@ -32,7 +32,8 @@ import tempfile
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from onnxruntime.quantization.shape_inference import quant_pre_process
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# weights/ vive en la raíz del repo, un nivel por encima de conversion/.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser(
     description='Cuantiza (FP32 -> INT8, dinamica) un modelo ONNX.',
