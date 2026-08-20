@@ -25,3 +25,7 @@ onnx==1.22.0
 
 # cuantizar_onnx.py: convertir weights/best.onnx a weights/best.int8.onnx (solo dev)
 # usa onnxruntime.quantization, ya incluido arriba
+
+# deteccion.py --runtime ncnn: inferencia con NCNN (optimizado para CPUs ARM, p.ej. Raspberry Pi).
+# exportar_ncnn.py (generar weights/best_ncnn_model/) tambien usa este paquete.
+ncnn==1.0.20260526
