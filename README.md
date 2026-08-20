@@ -20,8 +20,9 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `vuelo.py` — Dominio `vuelo`: telemetría de vuelo (de momento con datos simulados, a la espera del Pixhawk) y escritura de `posicion_actual.json`.
 - `deteccion.py` — Dominio `deteccion`: detección de personas (YOLO) sobre un vídeo o una cámara en vivo (`--camera`), con alerta MQTT georreferenciada.
 - `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto.
-- `weights/` — Pesos del modelo YOLO entrenado: `best.pt` (PyTorch) y, opcionalmente, `best.onnx` (ONNX), usados por `deteccion.py` según `--runtime`.
+- `weights/` — Pesos del modelo YOLO entrenado: `best.pt` (PyTorch) y, opcionalmente, `best.onnx` (ONNX) y `best.int8.onnx` (ONNX cuantizado), usados por `deteccion.py` según `--runtime`.
 - `exportar_onnx.py` — Utilidad puntual para generar `weights/best.onnx` a partir de `weights/best.pt`; volver a ejecutarlo cada vez que haya un `best.pt` nuevo (reentrenamiento).
+- `cuantizar_onnx.py` — Utilidad puntual para generar `weights/best.int8.onnx` (cuantización dinámica a INT8) a partir de `weights/best.onnx`; más ligero y rápido en CPU, a costa de algo de precisión. Volver a ejecutarlo cada vez que se regenere `best.onnx`.
 - `samples/` — Vídeos de prueba para `deteccion.py`.
 - `results/videos/` — Vídeos anotados generados por `deteccion.py` (se crea automáticamente; excluida de git).
 - `results/fotos/` — Fotogramas JPEG de cada alerta enviada por `deteccion.py` (se crea automáticamente; excluida de git).
@@ -77,7 +78,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Python 3.10+
 - Broker MQTT accesible (Mosquitto en el EC2)
 - Entorno virtual en `/home/nerea/bme680-env`
-- Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `exportar_onnx.py`)
+- Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `exportar_onnx.py`; con `--runtime onnx-int8`, además `weights/best.int8.onnx`, generado con `cuantizar_onnx.py`)
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
 ## Conexionado del sensor
 | Pin del sensor | Pin de la Raspberry Pi | Nº de pin |
@@ -169,12 +170,15 @@ Por defecto (`--overlay true`) esa foto lleva superpuestas las coordenadas del d
 python deteccion.py samples/vuelo1.mp4 --overlay false   # fotos sin coordenadas/fecha superpuestas
 ```
 
-Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Con `--runtime onnx` carga en su lugar `weights/best.onnx` (más ligero y rápido de cargar), que hay que generar antes con `exportar_onnx.py`:
+Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Con `--runtime onnx` carga en su lugar `weights/best.onnx` (más ligero y rápido de cargar), que hay que generar antes con `exportar_onnx.py`; con `--runtime onnx-int8` carga `weights/best.int8.onnx`, la versión cuantizada a INT8 (aún más ligera y rápida en CPU, a costa de algo de precisión), que hay que generar antes con `cuantizar_onnx.py`:
 ```bash
 python exportar_onnx.py                          # genera weights/best.onnx a partir de weights/best.pt
 python deteccion.py samples/vuelo1.mp4 --runtime onnx
+
+python cuantizar_onnx.py                          # genera weights/best.int8.onnx a partir de weights/best.onnx
+python deteccion.py samples/vuelo1.mp4 --runtime onnx-int8
 ```
-Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a ejecutar `exportar_onnx.py` para regenerar el `.onnx` correspondiente; el motor de ejecución (`--runtime`) es independiente del modelo base.
+Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a ejecutar `exportar_onnx.py` (y, si se usa la versión cuantizada, `cuantizar_onnx.py` a continuación) para regenerar los ficheros correspondientes; el motor de ejecución (`--runtime`) es independiente del modelo base. Antes de usar `--runtime onnx-int8` en vuelo real, conviene comparar sus detecciones con las de `--runtime onnx` sobre el mismo vídeo, porque la cuantización dinámica no calibra con datos reales y puede perder algo de precisión.
 
 En la Raspberry Pi, en vez de un vídeo grabado se puede analizar en directo desde la cámara con `--camera` (mutuamente excluyente con `video_path`):
 ```bash
