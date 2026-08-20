@@ -71,6 +71,8 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 |---|---|---|---|---|---|
 | `sensor` | `sensor.py` | `dronsar/{dron_id}/sensor/config` | `set_sensor_interval` | `{"interval_seconds": N}` | Cambia el intervalo de captura del BME680 (segundos) |
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `set_video_throttle` | `{"throttle_ms": N}` | Cambia el anti-spam de alertas de vídeo (el valor llega en milisegundos y se convierte a segundos) |
+| `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `start_recording` | `{}` | Arranca la sesión de grabación/detección (solo tiene efecto con `--camera` y `--mqtt true`; ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)) |
+| `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `stop_recording` | `{}` | Detiene la sesión en curso (guarda el vídeo) sin cerrar el script, que vuelve a esperar el siguiente `start_recording` |
 | `sistema` | `sistema.py` | `dronsar/{dron_id}/sistema/config` | `shutdown` | `{}` | Apaga la Raspberry Pi (`sudo shutdown -h now`) |
 
 ## Requisitos
@@ -190,7 +192,17 @@ python deteccion.py --camera 0                      # cámara por índice (la pr
 python deteccion.py --camera /dev/video0             # cámara por ruta de dispositivo V4L2
 python deteccion.py --camera 0 --preview false       # en directo, sin ventana (para systemd)
 ```
-Con `--camera` la fuente no tiene fin natural (a diferencia de un fichero): el análisis sigue hasta pulsar `Ctrl+C` (o `q` en la ventana de preview si está activada). Requiere que la cámara esté expuesta como dispositivo V4L2 (`ls /dev/video*`); con el módulo oficial de la Raspberry Pi puede hacer falta `sudo modprobe bcm2835-v4l2` (o la capa de compatibilidad de libcamera) para que aparezca como `/dev/video0`.
+Con `--camera` la fuente no tiene fin natural (a diferencia de un fichero): el análisis sigue hasta pulsar `Ctrl+C` (o `q` en la ventana de preview si está activada, lo que además cierra el script del todo). Requiere que la cámara esté expuesta como dispositivo V4L2 (`ls /dev/video*`); con el módulo oficial de la Raspberry Pi puede hacer falta `sudo modprobe bcm2835-v4l2` (o la capa de compatibilidad de libcamera) para que aparezca como `/dev/video0`.
+
+#### Arranque y parada remota de `deteccion.py`
+Con `--camera` **y** `--mqtt true` (el caso real: el servicio systemd), `deteccion.py` no arranca solo al lanzarlo: se queda a la espera del comando `start_recording` en `dronsar/{dron_id}/deteccion/config` (el mismo topic que `set_video_throttle`, ver [Flujo de configuración](#flujo-de-configuración)). Mientras espera no hay preview, ni vídeo, ni detección — el proceso solo escucha MQTT:
+```bash
+python deteccion.py --camera 0 --preview false
+# -> "A la espera de 'start_recording' desde el panel (topic 'dronsar/dron-02/deteccion/config')..."
+```
+Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión en `results/videos/` con su propio timestamp— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
+
+Con un fichero de vídeo, o con `--mqtt false`, no hay nada que esperar: `deteccion.py` arranca directo, como siempre (estos comandos no tienen efecto en ese caso).
 
 Receptor de comandos:
 ```bash
@@ -229,6 +241,8 @@ A diferencia de los demás, `deteccion.py` no es un colector en bucle infinito s
 1. Editar la línea `ExecStart` del fichero: dejar la ruta de un vídeo (por defecto trae el placeholder `samples/vuelo1.mp4`) o sustituirla por `--camera 0` (u otro índice/ruta de dispositivo) para analizar en directo desde la cámara de la Pi.
 2. Mantener `--preview false`: un servicio systemd no tiene pantalla, así que la ventana de vista previa (`cv2.imshow`) fallaría si se deja activada. El vídeo anotado en `results/videos/` y las fotos en `results/fotos/` se generan igualmente sin preview.
 3. Decidir la política de reinicio según la fuente: con un vídeo, `Restart=on-failure` (por defecto) no lo vuelve a lanzar si termina bien; con `--camera`, el proceso no termina solo (sigue en directo), así que `on-failure` solo lo reinicia si falla — tiene sentido dejarlo así o cambiarlo a `always` si se quiere que se recupere también de una caída limpia de la cámara.
+
+Con `--camera` y `--mqtt true` (el caso normal de este servicio), el proceso arranca y se queda esperando el comando `start_recording` del panel de control — no analiza nada hasta que se lo mandan (ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Esto es intencional: el servicio puede estar `enable --now` de forma permanente sin grabar nada hasta que se necesite.
 
 ```bash
 sudo cp deteccion-sar.service /etc/systemd/system/

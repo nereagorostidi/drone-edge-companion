@@ -20,6 +20,20 @@ permite analizar en directo en vez de sobre un vídeo ya grabado. Con
 una cámara la fuente no tiene fin natural: el script sigue analizando
 hasta que se detiene con Ctrl+C (o 'q' en la ventana de preview).
 
+Con --camera y MQTT activo (el caso real: el servicio systemd), el
+script NO arranca a analizar solo: se queda a la espera del comando
+'start_recording' del panel de control, en el mismo topic de
+configuración que usa 'set_video_throttle'
+(dronsar/{dron_id}/deteccion/config). Mientras espera no hay preview,
+ni vídeo, ni detección: el proceso solo escucha MQTT. Al recibir
+'start_recording' arranca la sesión (vídeo, preview, detección y
+alertas, todo junto); al recibir 'stop_recording' la cierra (guarda el
+vídeo de esa sesión) SIN cerrar el script, que vuelve a quedarse a la
+espera del siguiente 'start_recording'. Cada sesión genera su propio
+vídeo en results/videos/, con su propio timestamp. Con un fichero de
+vídeo, o sin MQTT, no hay nada que esperar: arranca directo, como
+siempre.
+
 A cada alerta se le adjunta la posición del dron, que se lee del fichero
 posicion_actual.json que escribe vuelo.py. Así el mensaje lleva la zona
 (posición del dron) y los píxeles de la caja dentro del fotograma.
@@ -49,7 +63,7 @@ Uso:
     python3 deteccion.py vuelo1.mp4 --mqtt false     # no envía por MQTT
     python3 deteccion.py vuelo1.mp4 --preview false  # sin ventana (output igual)
     python3 deteccion.py vuelo1.mp4 --anti-spam 3    # una alerta como mucho cada 3 s
-    python3 deteccion.py --camera 0                  # cámara en vivo (índice 0) en vez de un vídeo
+    python3 deteccion.py --camera 0                  # cámara en vivo (índice 0); con MQTT, espera 'start_recording' del panel
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
     python3 deteccion.py --camera 0 --preview false  # cámara en vivo, sin ventana (para systemd)
     python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
@@ -244,14 +258,20 @@ if MQTT_ON:
         print(f"Suscrito a '{CONFIG_TOPIC}'")
 
     def on_message(client, userdata, msg):
-        """Actualiza el throttle de vídeo al recibir un comando de configuración.
+        """Aplica un comando de configuración recibido del panel de control.
 
         Formato del payload (lo publica api.py, ver COMANDOS_CONFIG):
-            {"command": "set_video_throttle", "params": {"throttle_ms": N}, ...}
-        throttle_ms llega en MILISEGUNDOS; anti_spam_actual se guarda en segundos
-        (es lo que compara el bucle principal contra time.monotonic()).
+            {"command": "...", "params": {...}, "drone_id": "...",
+             "command_id": "...", "timestamp": "..."}
+
+        Comandos soportados en este topic:
+            set_video_throttle  {"throttle_ms": N}  Cambia el anti-spam de alertas
+                                                     (llega en ms; se guarda en s).
+            start_recording      {}                 Arranca la grabación/detección
+                                                     (ver ESPERA_COMANDO más abajo).
+            stop_recording        {}                 La detiene, sin cerrar el script.
         """
-        global anti_spam_actual
+        global anti_spam_actual, grabando
         try:
             orden = json.loads(msg.payload)
         except json.JSONDecodeError:
@@ -262,18 +282,25 @@ if MQTT_ON:
         cmd_id = orden.get("command_id", "?")
         print(f"Comando de configuración recibido [{cmd_id}]: {command}")
 
-        if command != "set_video_throttle":
+        if command == "set_video_throttle":
+            try:
+                throttle_ms = float(orden["params"]["throttle_ms"])
+            except (KeyError, TypeError, ValueError):
+                print("  -> 'params.throttle_ms' ausente o inválido; se ignora.")
+                return
+            anti_spam_actual = throttle_ms / 1000.0
+            print(f"  -> Anti-spam de alertas actualizado a {anti_spam_actual}s ({throttle_ms} ms)")
+
+        elif command == "start_recording":
+            grabando = True
+            print("  -> Grabación/detección iniciada")
+
+        elif command == "stop_recording":
+            grabando = False
+            print("  -> Grabación/detección detenida (el script sigue en marcha, a la espera)")
+
+        else:
             print(f"  -> Comando desconocido '{command}' en este topic; se ignora.")
-            return
-
-        try:
-            throttle_ms = float(orden["params"]["throttle_ms"])
-        except (KeyError, TypeError, ValueError):
-            print("  -> 'params.throttle_ms' ausente o inválido; se ignora.")
-            return
-
-        anti_spam_actual = throttle_ms / 1000.0
-        print(f"  -> Anti-spam de alertas actualizado a {anti_spam_actual}s ({throttle_ms} ms)")
 
     client = mqtt.Client(client_id=CLIENT_ID,
                          callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -435,93 +462,154 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
 
 
 # =====================================================================
-#  INFERENCIA  (tu código)
+#  ARRANQUE/PARADA REMOTA  (start_recording / stop_recording)
 # =====================================================================
-# stream=True: procesa el video frame a frame (con el salto de vid_stride)
-# sin cargarlo entero en memoria
-results = model.predict(
-    source=fuente,
-    imgsz=640,       # igual que el imgsz de entrenamiento; a menos resolucion se pierde detalle y confunde mas las clases
-    conf=args.conf,        # confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)
-    vid_stride=VID_STRIDE,    # 1 = analiza todos los frames; subirlo va mas rapido pero puede saltarse personas que pasan rapido
-    stream=True,
-    verbose=False,
-    augment=args.augment     # test-time augmentation: analiza cada frame varias veces (flips/escalas) y combina resultados, mas preciso pero mas lento
-)
+# Solo tiene sentido esperar un comando del panel en el caso de uso real:
+# camara en vivo + MQTT (el del servicio systemd). Con un fichero de video,
+# o sin MQTT (nadie puede mandar el comando), se arranca directo como
+# siempre. ESPERA_COMANDO controla ademas si, al parar una grabacion, el
+# script se queda vivo esperando la siguiente, o si termina del todo.
+ESPERA_COMANDO = MQTT_ON and args.camera is not None
+grabando = not ESPERA_COMANDO
+if ESPERA_COMANDO:
+    print(f"A la espera de 'start_recording' desde el panel (topic '{CONFIG_TOPIC}')...")
 
-writer = None
-ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam
-# Fecha de realización del vídeo: se fija una sola vez al empezar a
-# procesar, no en cada frame, para que el nombre del fichero sea estable.
-FECHA_INICIO = datetime.now()
+ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam (persiste entre sesiones)
+parar_por_usuario = False   # se puso a True al pulsar 'q' en el preview: para todo, no solo la sesion
+writer = None   # definido aqui para que el finally pueda cerrarlo aunque no haya arrancado ninguna sesion
+
 
 # =====================================================================
-#  BENCHMARK: Inicialización de contadores
+#  INFERENCIA  (tu código, ahora repetible: una vuelta por cada
+#  start_recording -> stop_recording)
 # =====================================================================
-tiempos_inferencia = []
-t_anterior = time.perf_counter()
-
 try:
-    for r in results:
-        # Medir tiempo del fotograma procesado
-        t_ahora = time.perf_counter()
-        latencia_frame = t_ahora - t_anterior
-        tiempos_inferencia.append(latencia_frame)
-        t_anterior = t_ahora
+    while not parar_por_usuario:
+        if ESPERA_COMANDO and not grabando:
+            # Nada que procesar todavia: seguimos vivos, atendiendo MQTT
+            # (el hilo de client.loop_start() ya escucha start_recording) y
+            # vaciando el buffer por si quedaban alertas pendientes de antes.
+            if MQTT_ON:
+                reenviar()
+            time.sleep(0.3)
+            continue
 
-        # Mostrar FPS instantáneos en la consola durante la ejecución
-        ms_actual = latencia_frame * 1000
-        fps_actual = 1.0 / latencia_frame if latencia_frame > 0 else 0
-        print(f"\r[Benchmark] Frame {len(tiempos_inferencia)}: {ms_actual:.1f} ms ({fps_actual:.1f} FPS)", end="", flush=True)
+        # stream=True: procesa el video frame a frame (con el salto de
+        # vid_stride) sin cargarlo entero en memoria.
+        results = model.predict(
+            source=fuente,
+            imgsz=640,       # igual que el imgsz de entrenamiento; a menos resolucion se pierde detalle y confunde mas las clases
+            conf=args.conf,        # confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)
+            vid_stride=VID_STRIDE,    # 1 = analiza todos los frames; subirlo va mas rapido pero puede saltarse personas que pasan rapido
+            stream=True,
+            verbose=False,
+            augment=args.augment     # test-time augmentation: analiza cada frame varias veces (flips/escalas) y combina resultados, mas preciso pero mas lento
+        )
 
-        annotated_frame = r.plot()
+        writer = None
+        # Fecha de realización del vídeo: se fija una vez por sesión de
+        # grabación (no una sola vez para todo el proceso), para que cada
+        # start_recording genere su propio fichero con su propio nombre.
+        FECHA_INICIO = datetime.now()
 
-        if writer is None:
-            h, w = annotated_frame.shape[:2]
-            videos_dir = os.path.join('results', 'videos')
-            os.makedirs(videos_dir, exist_ok=True)
-            fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
-            nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
-            output_path = os.path.join(videos_dir, nombre_video)
-            writer = cv2.VideoWriter(
-                output_path,
-                cv2.VideoWriter_fourcc(*'mp4v'),
-                fps_original / VID_STRIDE,
-                (w, h),
-            )
-        writer.write(annotated_frame)
+        # ------------------- BENCHMARK: contadores de esta sesión -------------------
+        tiempos_inferencia = []
+        t_anterior = time.perf_counter()
 
-        # ----- NUEVO: detección -> alerta MQTT (con anti-spam) -----
-        if MQTT_ON and r.boxes is not None and len(r.boxes) > 0:
-            ahora = time.monotonic()
-            if ahora - ultimo_envio >= anti_spam_actual:
-                ts = datetime.now().astimezone()
-                pos = leer_posicion()
-                if pos:
-                    _posicion_fresca(pos)
-                else:
-                    print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
-                          "¿Está vuelo.py en marcha en la misma carpeta?)")
-                foto_nombre = guardar_foto(annotated_frame, pos, ts)
-                procesar_detecciones(r, foto_nombre, ts, pos)
-                ultimo_envio = ahora
-        # Se intenta vaciar el buffer en cada frame (barato si está vacío).
-        if MQTT_ON:
-            reenviar()
+        for r in results:
+            # Medir tiempo del fotograma procesado
+            t_ahora = time.perf_counter()
+            latencia_frame = t_ahora - t_anterior
+            tiempos_inferencia.append(latencia_frame)
+            t_anterior = t_ahora
 
-        # Vista previa opcional (--preview). El vídeo de salida ya se ha
-        # escrito arriba, así que se genera SIEMPRE, se muestre o no la ventana.
-        if args.preview:
-            # Redimensionar manteniendo la proporcion original
-            # (960x540 fijo deformaba los videos verticales del iPhone)
-            h, w = annotated_frame.shape[:2]
-            escala = 540 / h
-            vista = cv2.resize(annotated_frame, (round(w * escala), 540))
+            # Mostrar FPS instantáneos en la consola durante la ejecución
+            ms_actual = latencia_frame * 1000
+            fps_actual = 1.0 / latencia_frame if latencia_frame > 0 else 0
+            print(f"\r[Benchmark] Frame {len(tiempos_inferencia)}: {ms_actual:.1f} ms ({fps_actual:.1f} FPS)", end="", flush=True)
 
-            # Mostrar ventana interactiva (q para salir)
-            cv2.imshow('Detector de personas', vista)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            annotated_frame = r.plot()
+
+            if writer is None:
+                h, w = annotated_frame.shape[:2]
+                videos_dir = os.path.join('results', 'videos')
+                os.makedirs(videos_dir, exist_ok=True)
+                fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
+                nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
+                output_path = os.path.join(videos_dir, nombre_video)
+                writer = cv2.VideoWriter(
+                    output_path,
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    fps_original / VID_STRIDE,
+                    (w, h),
+                )
+            writer.write(annotated_frame)
+
+            # ----- NUEVO: detección -> alerta MQTT (con anti-spam) -----
+            if MQTT_ON and r.boxes is not None and len(r.boxes) > 0:
+                ahora = time.monotonic()
+                if ahora - ultimo_envio >= anti_spam_actual:
+                    ts = datetime.now().astimezone()
+                    pos = leer_posicion()
+                    if pos:
+                        _posicion_fresca(pos)
+                    else:
+                        print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
+                              "¿Está vuelo.py en marcha en la misma carpeta?)")
+                    foto_nombre = guardar_foto(annotated_frame, pos, ts)
+                    procesar_detecciones(r, foto_nombre, ts, pos)
+                    ultimo_envio = ahora
+            # Se intenta vaciar el buffer en cada frame (barato si está vacío).
+            if MQTT_ON:
+                reenviar()
+
+            # Vista previa opcional (--preview). El vídeo de salida ya se ha
+            # escrito arriba, así que se genera SIEMPRE, se muestre o no la ventana.
+            if args.preview:
+                # Redimensionar manteniendo la proporcion original
+                # (960x540 fijo deformaba los videos verticales del iPhone)
+                h, w = annotated_frame.shape[:2]
+                escala = 540 / h
+                vista = cv2.resize(annotated_frame, (round(w * escala), 540))
+
+                # Mostrar ventana interactiva (q para salir del todo)
+                cv2.imshow('Detector de personas', vista)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    parar_por_usuario = True
+                    break
+
+            # stop_recording recibido a media sesión: cortamos aquí: el resto
+            # se trata igual que si el vídeo/cámara hubiera terminado.
+            if MQTT_ON and not grabando:
                 break
+
+        # ---------------- Cierre de ESTA sesión de grabación ----------------
+        if writer is not None:
+            writer.release()
+            writer = None
+        cv2.destroyAllWindows()
+
+        # ------------------- BENCHMARK: resumen de esta sesión -------------------
+        if len(tiempos_inferencia) > 1:
+            # Descartamos el primer frame porque suele tardar más (warmup)
+            tiempos_validos = tiempos_inferencia[1:]
+            media_s = sum(tiempos_validos) / len(tiempos_validos)
+            media_ms = media_s * 1000
+            fps_medio = 1.0 / media_s if media_s > 0 else 0
+
+            print(f"\n\n{'='*42}")
+            print(f" RESUMEN DE RENDIMIENTO ({args.runtime.upper()})")
+            print(f"{'='*42}")
+            print(f" Total frames procesados : {len(tiempos_inferencia)}")
+            print(f" Latencia media por frame: {media_ms:.2f} ms")
+            print(f" Rendimiento medio       : {fps_medio:.2f} FPS")
+            print(f"{'='*42}\n")
+
+        if not ESPERA_COMANDO:
+            # Video de fichero, o sin MQTT: una sola pasada, como siempre.
+            break
+        # Camara + MQTT: seguimos vivos, volvemos arriba a esperar el
+        # siguiente start_recording (grabando ya esta a False aqui).
 
 except KeyboardInterrupt:
     # Con --camera el analisis no tiene fin natural (a diferencia de un
@@ -529,7 +617,7 @@ except KeyboardInterrupt:
     print("\nDetenido por el usuario.")
 
 finally:
-    # Cierre ordenado (también si se interrumpe con Ctrl+C).
+    # Cierre ordenado (también si se interrumpe con Ctrl+C a media sesión).
     if writer is not None:
         writer.release()
     cv2.destroyAllWindows()
@@ -538,21 +626,3 @@ finally:
         client.loop_stop()
         client.disconnect()
         db.close()
-
-    # =====================================================================
-    #  BENCHMARK: Imprimir el resumen final comparativo
-    # =====================================================================
-    if len(tiempos_inferencia) > 1:
-        # Descartamos el primer frame porque suele tardar más (warmup)
-        tiempos_validos = tiempos_inferencia[1:]
-        media_s = sum(tiempos_validos) / len(tiempos_validos)
-        media_ms = media_s * 1000
-        fps_medio = 1.0 / media_s if media_s > 0 else 0
-
-        print(f"\n\n{'='*42}")
-        print(f" RESUMEN DE RENDIMIENTO ({args.runtime.upper()})")
-        print(f"{'='*42}")
-        print(f" Total frames procesados : {len(tiempos_inferencia)}")
-        print(f" Latencia media por frame: {media_ms:.2f} ms")
-        print(f" Rendimiento medio       : {fps_medio:.2f} FPS")
-        print(f"{'='*42}\n")
