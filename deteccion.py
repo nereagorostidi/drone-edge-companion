@@ -58,6 +58,12 @@ dron (la ubicación aproximada de la persona), leída de posicion_actual.json.
 Si vuelo.py no está en marcha, ese fichero no existe y la alerta sale con
 las coordenadas nulas (y un aviso por consola).
 
+Al terminar cada sesión de grabación (con MQTT activo) se publica además
+un resumen en dronsar/{dron_id}/video/resumen: evento, fichero de vídeo,
+duración, frames totales, rendimiento (runtime, fps medio, latencia media
+y p95, vid_stride), detecciones (alertas emitidas y confianza media) y
+timestamp_inicio/timestamp_fin de la sesión (ver publicar_resumen_video).
+
 Uso:
     python3 deteccion.py vuelo1.mp4                  # MQTT y preview (por defecto)
     python3 deteccion.py vuelo1.mp4 --mqtt false     # no envía por MQTT
@@ -169,6 +175,9 @@ CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
 # Topic de configuración remota (panel de control -> este script), con el
 # mismo esquema "dronsar/..." que usa receptor.py para comandos.
 CONFIG_TOPIC = f"dronsar/{DRON_ID}/deteccion/config"
+
+# Topic del resumen de cada sesión de grabación (ver publicar_resumen_video).
+RESUMEN_TOPIC = f"dronsar/{DRON_ID}/video/resumen"
 
 # Anti-spam EN USO (segundos mínimos entre alertas MQTT). Arranca con el
 # valor de --anti-spam, pero se puede actualizar en caliente desde el panel
@@ -425,9 +434,13 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
     para esta llamada, en el bucle principal). El control de frecuencia
     (anti-spam) lo aplica el bucle principal, para no saturar el topic
     con la misma persona en frames consecutivos.
+
+    Devuelve la lista de confianzas de las alertas encoladas en esta
+    llamada, para que el bucle principal las acumule y calcule la
+    'confianza_media' del resumen de la sesión (ver publicar_resumen_video).
     """
     if r.boxes is None or len(r.boxes) == 0:
-        return
+        return []
 
     ts_iso = ts.isoformat()
 
@@ -446,9 +459,11 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
     cajas = r.boxes.xywh.cpu().numpy()         # [N, 4] -> cx, cy, w, h (píxeles)
     confianzas = r.boxes.conf.cpu().numpy()    # [N]
 
+    confianzas_encoladas = []
     for (cx, cy, w, h), conf in zip(cajas, confianzas):
+        conf_redondeada = round(float(conf), 2)
         mensaje = {
-            "confianza": round(float(conf), 2),
+            "confianza": conf_redondeada,
             # Caja de la persona dentro del fotograma (píxeles): centro y tamaño.
             "caja": {"cx": int(cx), "cy": int(cy), "w": int(w), "h": int(h)},
             "resolucion": {"ancho": int(ancho), "alto": int(alto)},
@@ -459,6 +474,71 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
             "timestamp": ts_iso,
         }
         guardar_deteccion(ts_iso, json.dumps(mensaje))
+        confianzas_encoladas.append(conf_redondeada)
+    return confianzas_encoladas
+
+
+def _percentil(valores, p):
+    """Percentil p (0-100) de una lista, por interpolación lineal (sin numpy)."""
+    if not valores:
+        return 0.0
+    ordenados = sorted(valores)
+    k = (len(ordenados) - 1) * (p / 100)
+    piso, techo = int(k), min(int(k) + 1, len(ordenados) - 1)
+    if piso == techo:
+        return ordenados[piso]
+    return ordenados[piso] + (ordenados[techo] - ordenados[piso]) * (k - piso)
+
+
+def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias_ms,
+                            alertas_total, confianzas_alertas):
+    """Publica el resumen de una sesión de grabación que acaba de terminar.
+
+    Formato acordado con el tutor, topic dronsar/{dron_id}/video/resumen.
+    Se manda SIEMPRE que termine una sesión con MQTT activo (aunque haya
+    durado 0 frames). 'timestamp' se manda igual a 'timestamp_fin' para que
+    el puente hacia InfluxDB use la hora exacta de cierre de la sesión en
+    vez de la hora de llegada del mensaje.
+    """
+    if latencias_ms:
+        latencia_media_ms = sum(latencias_ms) / len(latencias_ms)
+        latencia_p95_ms = _percentil(latencias_ms, 95)
+        fps_medio = 1000.0 / latencia_media_ms if latencia_media_ms > 0 else 0.0
+    else:
+        latencia_media_ms = latencia_p95_ms = fps_medio = 0.0
+    confianza_media = (round(sum(confianzas_alertas) / len(confianzas_alertas), 2)
+                        if confianzas_alertas else 0.0)
+
+    resumen = {
+        "evento": "sesion_completada",
+        "dron_id": DRON_ID,
+        "video": {
+            "fichero": fichero_video,
+            "duracion_segundos": round((fin - inicio).total_seconds(), 1),
+            "frames_totales": frames_totales,
+        },
+        "rendimiento": {
+            "runtime": args.runtime,
+            "fps_medio": round(fps_medio, 1),
+            "latencia_media_ms": round(latencia_media_ms, 1),
+            "latencia_p95_ms": round(latencia_p95_ms, 1),
+            "vid_stride": VID_STRIDE,
+        },
+        "detecciones": {
+            "total_alertas_emitidas": alertas_total,
+            "confianza_media": confianza_media,
+        },
+        "timestamp_inicio": inicio.isoformat(),
+        "timestamp_fin": fin.isoformat(),
+        "timestamp": fin.isoformat(),
+    }
+    payload = json.dumps(resumen)
+    try:
+        info = client.publish(RESUMEN_TOPIC, payload, qos=1)
+        info.wait_for_publish(timeout=5)
+        print(f"Resumen de sesión enviado [{RESUMEN_TOPIC}]: {payload}")
+    except (ValueError, RuntimeError) as e:
+        print(f"  (aviso: no se pudo publicar el resumen de la sesión: {e})")
 
 
 # =====================================================================
@@ -510,11 +590,23 @@ try:
         # Fecha de realización del vídeo: se fija una vez por sesión de
         # grabación (no una sola vez para todo el proceso), para que cada
         # start_recording genere su propio fichero con su propio nombre.
-        FECHA_INICIO = datetime.now()
+        # Con zona horaria (igual que el resto de timestamps del script) para
+        # que timestamp_inicio del resumen sea comparable a timestamp_fin.
+        FECHA_INICIO = datetime.now().astimezone()
+        videos_dir = os.path.join('results', 'videos')
+        os.makedirs(videos_dir, exist_ok=True)
+        fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
+        # Nombre fijado ya aquí (no al escribir el primer frame): así el
+        # resumen de la sesión tiene un nombre de fichero aunque no se haya
+        # detectado/escrito ni un solo frame (sesión cortada casi al instante).
+        nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
+        output_path = os.path.join(videos_dir, nombre_video)
 
         # ------------------- BENCHMARK: contadores de esta sesión -------------------
         tiempos_inferencia = []
         t_anterior = time.perf_counter()
+        alertas_sesion = 0        # total de alertas MQTT encoladas en esta sesión
+        confianzas_sesion = []    # confianza de cada una de esas alertas
 
         for r in results:
             # Medir tiempo del fotograma procesado
@@ -532,11 +624,6 @@ try:
 
             if writer is None:
                 h, w = annotated_frame.shape[:2]
-                videos_dir = os.path.join('results', 'videos')
-                os.makedirs(videos_dir, exist_ok=True)
-                fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
-                nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
-                output_path = os.path.join(videos_dir, nombre_video)
                 writer = cv2.VideoWriter(
                     output_path,
                     cv2.VideoWriter_fourcc(*'mp4v'),
@@ -557,7 +644,9 @@ try:
                         print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
                               "¿Está vuelo.py en marcha en la misma carpeta?)")
                     foto_nombre = guardar_foto(annotated_frame, pos, ts)
-                    procesar_detecciones(r, foto_nombre, ts, pos)
+                    confs = procesar_detecciones(r, foto_nombre, ts, pos)
+                    alertas_sesion += len(confs)
+                    confianzas_sesion.extend(confs)
                     ultimo_envio = ahora
             # Se intenta vaciar el buffer en cada frame (barato si está vacío).
             if MQTT_ON:
@@ -600,6 +689,8 @@ try:
         if dataset is not None and hasattr(dataset, 'close'):
             dataset.close()
 
+        FIN_SESION = datetime.now().astimezone()
+
         # ------------------- BENCHMARK: resumen de esta sesión -------------------
         if len(tiempos_inferencia) > 1:
             # Descartamos el primer frame porque suele tardar más (warmup)
@@ -615,6 +706,22 @@ try:
             print(f" Latencia media por frame: {media_ms:.2f} ms")
             print(f" Rendimiento medio       : {fps_medio:.2f} FPS")
             print(f"{'='*42}\n")
+
+        # ----- NUEVO: resumen de la sesión -> MQTT (dronsar/.../video/resumen) -----
+        # Se manda siempre que termine una sesión con MQTT activo (aunque
+        # haya sido de 0 o 1 frame), para que el panel se entere de que la
+        # grabación se ha cerrado y con qué estadísticas.
+        if MQTT_ON:
+            latencias_ms = [t * 1000 for t in tiempos_inferencia[1:]]  # sin el frame de warmup, igual que arriba
+            publicar_resumen_video(
+                fichero_video=nombre_video,
+                inicio=FECHA_INICIO,
+                fin=FIN_SESION,
+                frames_totales=len(tiempos_inferencia),
+                latencias_ms=latencias_ms,
+                alertas_total=alertas_sesion,
+                confianzas_alertas=confianzas_sesion,
+            )
 
         if not ESPERA_COMANDO:
             # Video de fichero, o sin MQTT: una sola pasada, como siempre.
