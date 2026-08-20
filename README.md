@@ -49,7 +49,22 @@ YOLO → deteccion.py ────────┘
 
 `vuelo.py` escribe además, en cada ciclo, `posicion_actual.json` con la última posición del dron (escritura atómica). `deteccion.py` lee ese fichero para adjuntar la posición aproximada de cada persona detectada a su alerta MQTT; si `vuelo.py` no está en marcha, la alerta se envía igualmente pero sin coordenadas.
 
-`deteccion.py` genera además, por cada ejecución, un vídeo anotado en `results/videos/` (nombrado con el ID del dron, el vídeo de origen y la fecha), y por cada alerta enviada (respetando el `--anti-spam`) guarda una foto del frame en `results/fotos/`. El nombre de esa foto viaja también dentro del JSON de la alerta MQTT, en el campo `foto`, para poder relacionar cada alerta con su imagen.
+`deteccion.py` genera además, por cada sesión de grabación (con un vídeo de fichero, una sesión = toda la ejecución; con `--camera` y MQTT, una sesión = de `start_recording` a `stop_recording`), un vídeo anotado en `results/videos/` (nombrado con el ID del dron, la fuente y la fecha de inicio de esa sesión), y por cada alerta enviada (respetando el `--anti-spam`) guarda una foto del frame en `results/fotos/`. El nombre de esa foto viaja también dentro del JSON de la alerta MQTT, en el campo `foto`, para poder relacionar cada alerta con su imagen.
+
+Al terminar cada sesión de grabación (con `--mqtt true`), `deteccion.py` publica además un resumen en `dronsar/{dron_id}/video/resumen` — a diferencia de las alertas de detección, este mensaje se publica directo (sin pasar por el buffer SQLite de store-and-forward):
+```json
+{
+  "evento": "sesion_completada",
+  "dron_id": "dron01",
+  "video": {"fichero": "dron01_camara0_20260820_231500.mp4", "duracion_segundos": 142.5, "frames_totales": 1280},
+  "rendimiento": {"runtime": "onnx", "fps_medio": 18.4, "latencia_media_ms": 54.3, "latencia_p95_ms": 68.1, "vid_stride": 6},
+  "detecciones": {"total_alertas_emitidas": 4, "confianza_media": 0.82},
+  "timestamp_inicio": "2026-08-20T23:15:00.000000+02:00",
+  "timestamp_fin": "2026-08-20T23:17:22.500000+02:00",
+  "timestamp": "2026-08-20T23:17:22.500000+02:00"
+}
+```
+`timestamp` va siempre igual a `timestamp_fin`, para que el puente hacia InfluxDB use la hora exacta de cierre de la sesión en vez de la hora de llegada del mensaje. Se manda siempre que se cierra una sesión (`stop_recording`, `q` en el preview, o fin natural de un vídeo de fichero), aunque la sesión haya durado 0 frames.
 
 ## Flujo de comandos
 El panel de control envía órdenes al dron (armar, desarmar…) a través de esta cadena:
@@ -164,7 +179,7 @@ python deteccion.py samples/vuelo1.mp4 --mqtt false       # solo detección + v�
 python deteccion.py samples/vuelo1.mp4 --preview false    # sin ventana, el vídeo en results/videos/ se genera igual
 python deteccion.py -h                                    # todas las opciones (--conf, --vid-stride, --anti-spam...)
 ```
-El vídeo anotado se guarda siempre en `results/videos/{DRON_ID}_{fuente}_{fecha}.mp4`. Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `results/fotos/{DRON_ID}_{fecha}.jpg`, cuyo nombre viaja en el campo `foto` del JSON de la alerta.
+El vídeo anotado de cada sesión se guarda en `results/videos/{DRON_ID}_{fuente}_{fecha}.mp4` (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `results/fotos/{DRON_ID}_{fecha}.jpg`, cuyo nombre viaja en el campo `foto` del JSON de la alerta.
 
 Para que las alertas lleven posición, `vuelo.py` debe estar en marcha en la misma carpeta (comparten `posicion_actual.json`); si no lo está, la alerta se envía igualmente pero sin coordenadas.
 
@@ -225,7 +240,7 @@ Cada proceso tiene ya su propio fichero `.service` en el repositorio, listo para
 | `sensor-sar.service` | `sensor.py` (dominio `ambiental`) | `always` — captura continua |
 | `sistema-sar.service` | `sistema.py` (dominio `sistema`) | `always` — captura continua |
 | `vuelo-sar.service` | `vuelo.py` (dominio `vuelo`) | `always` — captura continua |
-| `deteccion-sar.service` | `deteccion.py` (dominio `deteccion`) | `on-failure` — procesa un vídeo concreto, no un flujo continuo |
+| `deteccion-sar.service` | `deteccion.py` (dominio `deteccion`) | `on-failure` — con un vídeo, procesa un fichero concreto y termina; con `--camera` y MQTT, queda en marcha indefinidamente a la espera de `start_recording`/`stop_recording` |
 | `receptor-sar.service` | `receptor.py` (comandos) | `on-failure` |
 
 Instalación de cualquiera de los servicios de captura continua (`sensor-sar`, `sistema-sar`, `vuelo-sar`) o del receptor — mismo patrón para los cinco, cambiando el nombre del fichero:
