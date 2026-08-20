@@ -53,6 +53,7 @@ Uso:
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
     python3 deteccion.py --camera 0 --preview false  # cámara en vivo, sin ventana (para systemd)
     python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
+    python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere exportar_onnx.py antes)
     python3 deteccion.py -h                           # ayuda con los valores por defecto
 
 Variables de entorno (.env) — necesarias solo con --mqtt true:
@@ -117,6 +118,10 @@ parser.add_argument('--anti-spam', type=float, default=5.0,
                      help='Segundos minimos entre envios de alertas por MQTT, para no saturar el topic con la misma persona en frames seguidos')
 parser.add_argument('--overlay', type=_str2bool, default=True,
                      help='Añadir a la foto guardada (results/fotos/) la posicion del dron y la fecha/hora de la deteccion (true/false). No afecta al video anotado ni al preview')
+parser.add_argument('--runtime', choices=('onnx', 'pt'), default='pt',
+                     help="Motor de inferencia: 'pt' carga weights/best.pt via PyTorch (el de siempre); "
+                          "'onnx' carga weights/best.onnx via ONNX Runtime (mas ligero/rapido, requiere "
+                          "haberlo generado antes con exportar_onnx.py)")
 args = parser.parse_args()
 
 
@@ -166,8 +171,16 @@ POS_MAX_EDAD = 5.0
 # =====================================================================
 #  MODELO Y VÍDEO  (tu código)
 # =====================================================================
-# Cargar VUESTRO cerebro entrenado
-model = YOLO('weights/best.pt')
+# Cargar VUESTRO cerebro entrenado. El motor de inferencia (--runtime)
+# es independiente del modelo base: solo decide si se carga el .onnx
+# (ONNX Runtime) o el .pt (PyTorch, el de siempre).
+WEIGHTS_PATH = os.path.join(BASE_DIR, 'weights', f'best.{args.runtime}')
+if not os.path.isfile(WEIGHTS_PATH):
+    raise SystemExit(
+        f'No encuentro "{WEIGHTS_PATH}". '
+        + ('Genera ese fichero antes con exportar_onnx.py o usa --runtime pt.'
+           if args.runtime == 'onnx' else 'Falta weights/best.pt.'))
+model = YOLO(WEIGHTS_PATH)
 
 video_path = args.video_path
 VID_STRIDE = args.vid_stride
