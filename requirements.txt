@@ -16,3 +16,6 @@ torch==2.13.0
 torchvision==0.28.0
 opencv-python==5.0.0.93
 ultralytics==8.4.123
+
+# exportar_onnx.py: convertir weights/best.pt a weights/best.onnx (solo dev, no lo usa deteccion.py)
+onnx==1.22.0

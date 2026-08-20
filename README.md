@@ -20,7 +20,8 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `vuelo.py` — Dominio `vuelo`: telemetría de vuelo (de momento con datos simulados, a la espera del Pixhawk) y escritura de `posicion_actual.json`.
 - `deteccion.py` — Dominio `deteccion`: detección de personas (YOLO) sobre un vídeo o una cámara en vivo (`--camera`), con alerta MQTT georreferenciada.
 - `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto.
-- `weights/` — Pesos del modelo YOLO entrenado (`best.pt`), usado por `deteccion.py`.
+- `weights/` — Pesos del modelo YOLO entrenado: `best.pt` (PyTorch) y, opcionalmente, `best.onnx` (ONNX), usados por `deteccion.py` según `--runtime`.
+- `exportar_onnx.py` — Utilidad puntual para generar `weights/best.onnx` a partir de `weights/best.pt`; volver a ejecutarlo cada vez que haya un `best.pt` nuevo (reentrenamiento).
 - `samples/` — Vídeos de prueba para `deteccion.py`.
 - `results/videos/` — Vídeos anotados generados por `deteccion.py` (se crea automáticamente; excluida de git).
 - `results/fotos/` — Fotogramas JPEG de cada alerta enviada por `deteccion.py` (se crea automáticamente; excluida de git).
@@ -76,7 +77,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Python 3.10+
 - Broker MQTT accesible (Mosquitto en el EC2)
 - Entorno virtual en `/home/nerea/bme680-env`
-- Para `deteccion.py`: pesos del modelo en `weights/best.pt`
+- Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `exportar_onnx.py`)
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
 ## Conexionado del sensor
 | Pin del sensor | Pin de la Raspberry Pi | Nº de pin |
@@ -167,6 +168,13 @@ Por defecto (`--overlay true`) esa foto lleva superpuestas las coordenadas del d
 ```bash
 python deteccion.py samples/vuelo1.mp4 --overlay false   # fotos sin coordenadas/fecha superpuestas
 ```
+
+Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Con `--runtime onnx` carga en su lugar `weights/best.onnx` (más ligero y rápido de cargar), que hay que generar antes con `exportar_onnx.py`:
+```bash
+python exportar_onnx.py                          # genera weights/best.onnx a partir de weights/best.pt
+python deteccion.py samples/vuelo1.mp4 --runtime onnx
+```
+Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a ejecutar `exportar_onnx.py` para regenerar el `.onnx` correspondiente; el motor de ejecución (`--runtime`) es independiente del modelo base.
 
 En la Raspberry Pi, en vez de un vídeo grabado se puede analizar en directo desde la cámara con `--camera` (mutuamente excluyente con `video_path`):
 ```bash
