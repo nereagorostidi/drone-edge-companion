@@ -30,7 +30,7 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `vuelo-sar.service` — Servicio systemd del dominio `vuelo` (`vuelo.py`).
 - `deteccion-sar.service` — Servicio systemd de la detección (`deteccion.py`); requiere editar la fuente (ruta de vídeo o `--camera`) antes de instalarlo.
 - `receptor-sar.service` — Servicio systemd del receptor de comandos (`receptor.py`).
-- `requirements.txt` — Dependencias de Python.
+- `requirements.txt` — Dependencias de los 5 dominios (instala siempre todo junto, pensado para el nodo completo en la Pi).
 - `.env.example` — Plantilla de variables de entorno (copiar a `.env`).
 - `.gitignore` — Excluye el entorno virtual, el `.env`, las bases de datos locales (`*.db`) y las salidas generadas por `deteccion.py` (`results/`).
 
@@ -76,7 +76,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Python 3.10+
 - Broker MQTT accesible (Mosquitto en el EC2)
 - Entorno virtual en `/home/nerea/bme680-env`
-- Para `deteccion.py`: pesos del modelo en `weights/best.pt` y las dependencias `opencv-python` y `ultralytics` (añadir a `requirements.txt` si no están instaladas)
+- Para `deteccion.py`: pesos del modelo en `weights/best.pt`
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
 ## Conexionado del sensor
 | Pin del sensor | Pin de la Raspberry Pi | Nº de pin |
