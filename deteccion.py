@@ -455,8 +455,25 @@ ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam
 # procesar, no en cada frame, para que el nombre del fichero sea estable.
 FECHA_INICIO = datetime.now()
 
+# =====================================================================
+#  BENCHMARK: Inicialización de contadores
+# =====================================================================
+tiempos_inferencia = []
+t_anterior = time.perf_counter()
+
 try:
     for r in results:
+        # Medir tiempo del fotograma procesado
+        t_ahora = time.perf_counter()
+        latencia_frame = t_ahora - t_anterior
+        tiempos_inferencia.append(latencia_frame)
+        t_anterior = t_ahora
+
+        # Mostrar FPS instantáneos en la consola durante la ejecución
+        ms_actual = latencia_frame * 1000
+        fps_actual = 1.0 / latencia_frame if latencia_frame > 0 else 0
+        print(f"\r[Benchmark] Frame {len(tiempos_inferencia)}: {ms_actual:.1f} ms ({fps_actual:.1f} FPS)", end="", flush=True)
+
         annotated_frame = r.plot()
 
         if writer is None:
@@ -483,7 +500,7 @@ try:
                 if pos:
                     _posicion_fresca(pos)
                 else:
-                    print("  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
+                    print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
                           "¿Está vuelo.py en marcha en la misma carpeta?)")
                 foto_nombre = guardar_foto(annotated_frame, pos, ts)
                 procesar_detecciones(r, foto_nombre, ts, pos)
@@ -517,7 +534,25 @@ finally:
         writer.release()
     cv2.destroyAllWindows()
     if MQTT_ON:
-        reenviar()               # último intento de vaciar el buffer
+        reenviar()                 # último intento de vaciar el buffer
         client.loop_stop()
         client.disconnect()
         db.close()
+
+    # =====================================================================
+    #  BENCHMARK: Imprimir el resumen final comparativo
+    # =====================================================================
+    if len(tiempos_inferencia) > 1:
+        # Descartamos el primer frame porque suele tardar más (warmup)
+        tiempos_validos = tiempos_inferencia[1:]
+        media_s = sum(tiempos_validos) / len(tiempos_validos)
+        media_ms = media_s * 1000
+        fps_medio = 1.0 / media_s if media_s > 0 else 0
+
+        print(f"\n\n{'='*42}")
+        print(f" RESUMEN DE RENDIMIENTO ({args.runtime.upper()})")
+        print(f"{'='*42}")
+        print(f" Total frames procesados : {len(tiempos_inferencia)}")
+        print(f" Latencia media por frame: {media_ms:.2f} ms")
+        print(f" Rendimiento medio       : {fps_medio:.2f} FPS")
+        print(f"{'='*42}\n")
