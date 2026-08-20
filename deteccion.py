@@ -589,6 +589,17 @@ try:
             writer = None
         cv2.destroyAllWindows()
 
+        # Liberar la cámara (o el fichero) de ESTA sesión. Al cortar el
+        # generador de model.predict() con 'break' (stop_recording, 'q'),
+        # Ultralytics no cierra el cv2.VideoCapture por su cuenta: se queda
+        # abierto y "ocupado" por este mismo proceso, y el siguiente
+        # start_recording falla al no poder reabrir la cámara. Solo el
+        # loader de camara en vivo (LoadStreams) tiene close(); el de
+        # fichero de video no lo necesita (termina solo al agotarse).
+        dataset = getattr(model.predictor, 'dataset', None) if model.predictor is not None else None
+        if dataset is not None and hasattr(dataset, 'close'):
+            dataset.close()
+
         # ------------------- BENCHMARK: resumen de esta sesión -------------------
         if len(tiempos_inferencia) > 1:
             # Descartamos el primer frame porque suele tardar más (warmup)
