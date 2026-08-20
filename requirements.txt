@@ -20,12 +20,12 @@ ultralytics==8.4.123
 # deteccion.py --runtime onnx / onnx-int8: inferencia con ONNX Runtime en vez de PyTorch.
 onnxruntime==1.29.0
 
-# exportar_onnx.py: convertir weights/best.pt a weights/best.onnx (solo dev, no lo usa deteccion.py en tiempo de inferencia)
+# conversion/exportar_onnx.py: convertir weights/best.pt a weights/best.onnx (solo dev, no lo usa deteccion.py en tiempo de inferencia)
 onnx==1.22.0
 
-# cuantizar_onnx.py: convertir weights/best.onnx a weights/best.int8.onnx (solo dev)
+# conversion/cuantizar_onnx.py: convertir weights/best.onnx a weights/best.int8.onnx (solo dev)
 # usa onnxruntime.quantization, ya incluido arriba
 
 # deteccion.py --runtime ncnn: inferencia con NCNN (optimizado para CPUs ARM, p.ej. Raspberry Pi).
-# exportar_ncnn.py (generar weights/best_ncnn_model/) tambien usa este paquete.
+# conversion/exportar_ncnn.py (generar weights/best_ncnn_model/) tambien usa este paquete.
 ncnn==1.0.20260526

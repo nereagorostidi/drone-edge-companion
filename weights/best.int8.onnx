@@ -5624,7 +5624,7 @@ ai.onnx.mlB
 
 onnx.inferonnxruntime.quantr+
 onnx.quant.pre_processonnxruntime.quantr(
-date 2026-08-20T17:28:36.049962+02:00r=
+date 2026-08-20T19:36:29.770948+02:00r=
 description.Ultralytics YOLO11n model trained on data.yamlr
 authorUltralyticsr
 version8.4.115r

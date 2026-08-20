@@ -53,9 +53,9 @@ Uso:
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
     python3 deteccion.py --camera 0 --preview false  # cámara en vivo, sin ventana (para systemd)
     python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
-    python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere exportar_onnx.py antes)
-    python3 deteccion.py vuelo1.mp4 --runtime onnx-int8  # carga weights/best.int8.onnx (cuantizado, requiere cuantizar_onnx.py antes)
-    python3 deteccion.py vuelo1.mp4 --runtime ncnn   # carga weights/best_ncnn_model/ (requiere exportar_ncnn.py antes)
+    python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere conversion/exportar_onnx.py antes)
+    python3 deteccion.py vuelo1.mp4 --runtime onnx-int8  # carga weights/best.int8.onnx (cuantizado, requiere conversion/cuantizar_onnx.py antes)
+    python3 deteccion.py vuelo1.mp4 --runtime ncnn   # carga weights/best_ncnn_model/ (requiere conversion/exportar_ncnn.py antes)
     python3 deteccion.py -h                           # ayuda con los valores por defecto
 
 Variables de entorno (.env) — necesarias solo con --mqtt true:
@@ -123,12 +123,12 @@ parser.add_argument('--overlay', type=_str2bool, default=True,
 parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn'), default='pt',
                      help="Motor de inferencia: 'pt' carga weights/best.pt via PyTorch (el de siempre); "
                           "'onnx' carga weights/best.onnx via ONNX Runtime (mas ligero/rapido, requiere "
-                          "haberlo generado antes con exportar_onnx.py); 'onnx-int8' carga "
+                          "haberlo generado antes con conversion/exportar_onnx.py); 'onnx-int8' carga "
                           "weights/best.int8.onnx, la version cuantizada (aun mas ligera, requiere "
-                          "haberla generado antes con cuantizar_onnx.py; revisa la precision antes de "
+                          "haberla generado antes con conversion/cuantizar_onnx.py; revisa la precision antes de "
                           "usarla en vuelo real); 'ncnn' carga la carpeta weights/best_ncnn_model/ "
                           "(motor optimizado para CPUs ARM como la de la Raspberry Pi, requiere haberla "
-                          "generado antes con exportar_ncnn.py)")
+                          "generado antes con conversion/exportar_ncnn.py)")
 args = parser.parse_args()
 
 
@@ -184,8 +184,8 @@ POS_MAX_EDAD = 5.0
 # fichero salvo 'ncnn', que exporta una carpeta.
 NOMBRE_PESOS = {'pt': 'best.pt', 'onnx': 'best.onnx', 'onnx-int8': 'best.int8.onnx',
                 'ncnn': 'best_ncnn_model'}[args.runtime]
-GENERAR_CON = {'pt': None, 'onnx': 'exportar_onnx.py', 'onnx-int8': 'cuantizar_onnx.py',
-               'ncnn': 'exportar_ncnn.py'}[args.runtime]
+GENERAR_CON = {'pt': None, 'onnx': 'conversion/exportar_onnx.py', 'onnx-int8': 'conversion/cuantizar_onnx.py',
+               'ncnn': 'conversion/exportar_ncnn.py'}[args.runtime]
 WEIGHTS_PATH = os.path.join(BASE_DIR, 'weights', NOMBRE_PESOS)
 existe = os.path.isdir(WEIGHTS_PATH) if args.runtime == 'ncnn' else os.path.isfile(WEIGHTS_PATH)
 if not existe:

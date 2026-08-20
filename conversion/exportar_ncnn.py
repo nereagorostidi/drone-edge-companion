@@ -26,11 +26,11 @@ Requiere el paquete 'ncnn' además de 'ultralytics' (ya en
 requirements.txt):
     pip install ncnn
 
-Uso:
-    python3 exportar_ncnn.py                      # weights/best.pt -> weights/best_ncnn_model/
-    python3 exportar_ncnn.py --pesos otro.pt       # exportar otro fichero de pesos
-    python3 exportar_ncnn.py --imgsz 640           # tamaño de imagen (igual que el de entrenamiento)
-    python3 exportar_ncnn.py -h                    # ayuda con los valores por defecto
+Uso (desde la raíz del repo):
+    python3 conversion/exportar_ncnn.py                      # weights/best.pt -> weights/best_ncnn_model/
+    python3 conversion/exportar_ncnn.py --pesos otro.pt       # exportar otro fichero de pesos
+    python3 conversion/exportar_ncnn.py --imgsz 640           # tamaño de imagen (igual que el de entrenamiento)
+    python3 conversion/exportar_ncnn.py -h                    # ayuda con los valores por defecto
 """
 
 import argparse
@@ -38,7 +38,8 @@ import os
 
 from ultralytics import YOLO
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# weights/ vive en la raíz del repo, un nivel por encima de conversion/.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser(
     description='Exporta un fichero de pesos YOLO (.pt) a NCNN.',
