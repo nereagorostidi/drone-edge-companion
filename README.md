@@ -96,6 +96,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Python 3.10+
 - Broker MQTT accesible (Mosquitto en el EC2)
 - Entorno virtual en `/home/nerea/bme680-env`
+- Para `vuelo.py` (y el servicio `vuelo-sar.service`, que arranca sin `--fake`): Pixhawk conectado, o Mission Planner en modo SITL reenviando por MAVLink al puerto de `MAVLINK_CONN_VUELO`. Sin eso disponible al arrancar, el proceso se queda esperando el heartbeat MAVLink indefinidamente (no falla, simplemente no arranca del todo); para simular sin autopiloto, usar `--fake` (ver [Ejecución manual](#ejecución-manual))
 - Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `conversion/exportar_onnx.py`; con `--runtime onnx-int8`, además `weights/best.int8.onnx`, generado con `conversion/cuantizar_onnx.py`; con `--runtime ncnn`, además `weights/best_ncnn_model/`, generado con `conversion/exportar_ncnn.py`)
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
 ## Conexionado del sensor
@@ -174,9 +175,9 @@ Para leer del SITL, Mission Planner necesita reenviar por UDP a la Pi en un puer
 Detección de personas sobre un vídeo (requiere `weights/best.pt`):
 ```bash
 source /home/nerea/bme680-env/bin/activate
-python deteccion.py samples/vuelo1.mp4                    # MQTT y preview activados (por defecto)
+python deteccion.py samples/vuelo1.mp4                    # MQTT activado, SIN ventana de preview (por defecto)
 python deteccion.py samples/vuelo1.mp4 --mqtt false       # solo detección + vídeo anotado, sin MQTT
-python deteccion.py samples/vuelo1.mp4 --preview false    # sin ventana, el vídeo en results/videos/ se genera igual
+python deteccion.py samples/vuelo1.mp4 --preview true     # con ventana de vista previa; el vídeo en results/videos/ se genera igual
 python deteccion.py -h                                    # todas las opciones (--conf, --vid-stride, --anti-spam...)
 ```
 El vídeo anotado de cada sesión se guarda en `results/videos/{DRON_ID}_{fuente}_{fecha}.mp4` (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `results/fotos/{DRON_ID}_{fecha}.jpg`, cuyo nombre viaja en el campo `foto` del JSON de la alerta.
@@ -203,16 +204,16 @@ Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a
 
 En la Raspberry Pi, en vez de un vídeo grabado se puede analizar en directo desde la cámara con `--camera` (mutuamente excluyente con `video_path`):
 ```bash
-python deteccion.py --camera 0                      # cámara por índice (la primera detectada)
+python deteccion.py --camera 0                      # cámara por índice (la primera detectada); SIN ventana de preview (por defecto)
 python deteccion.py --camera /dev/video0             # cámara por ruta de dispositivo V4L2
-python deteccion.py --camera 0 --preview false       # en directo, sin ventana (para systemd)
+python deteccion.py --camera 0 --preview true        # en directo, con ventana (NO usar en systemd, no hay pantalla)
 ```
 Con `--camera` la fuente no tiene fin natural (a diferencia de un fichero): el análisis sigue hasta pulsar `Ctrl+C` (o `q` en la ventana de preview si está activada, lo que además cierra el script del todo). Requiere que la cámara esté expuesta como dispositivo V4L2 (`ls /dev/video*`); con el módulo oficial de la Raspberry Pi puede hacer falta `sudo modprobe bcm2835-v4l2` (o la capa de compatibilidad de libcamera) para que aparezca como `/dev/video0`.
 
 #### Arranque y parada remota de `deteccion.py`
 Con `--camera` **y** `--mqtt true` (el caso real: el servicio systemd), `deteccion.py` no arranca solo al lanzarlo: se queda a la espera del comando `start_recording` en `dronsar/{dron_id}/deteccion/config` (el mismo topic que `set_video_throttle`, ver [Flujo de configuración](#flujo-de-configuración)). Mientras espera no hay preview, ni vídeo, ni detección — el proceso solo escucha MQTT:
 ```bash
-python deteccion.py --camera 0 --preview false
+python deteccion.py --camera 0
 # -> "A la espera de 'start_recording' desde el panel (topic 'dronsar/dron-02/deteccion/config')..."
 ```
 Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión en `results/videos/` con su propio timestamp— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
@@ -249,12 +250,13 @@ sudo cp sensor-sar.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sensor-sar.service
 ```
+Con `vuelo-sar.service` en concreto, comprobar antes que el Pixhawk (o Mission Planner en SITL) ya está reenviando por MAVLink (ver [Requisitos](#requisitos)): el `ExecStart` no lleva `--fake`, así que sin eso disponible el servicio se queda esperando el heartbeat indefinidamente en vez de arrancar.
 
 ### Particularidad de `deteccion-sar.service`
 A diferencia de los demás, `deteccion.py` no es un colector en bucle infinito sobre un fichero: recibe como fuente O bien una ruta de vídeo O bien una cámara en vivo (`--camera`, ver [Ejecución manual](#ejecución-manual)). Antes de instalar `deteccion-sar.service` hay que:
 
 1. Editar la línea `ExecStart` del fichero: dejar la ruta de un vídeo (por defecto trae el placeholder `samples/vuelo1.mp4`) o sustituirla por `--camera 0` (u otro índice/ruta de dispositivo) para analizar en directo desde la cámara de la Pi.
-2. Mantener `--preview false`: un servicio systemd no tiene pantalla, así que la ventana de vista previa (`cv2.imshow`) fallaría si se deja activada. El vídeo anotado en `results/videos/` y las fotos en `results/fotos/` se generan igualmente sin preview.
+2. No añadir `--preview true`: un servicio systemd no tiene pantalla, así que la ventana de vista previa (`cv2.imshow`) fallaría si se activa. `--preview` es `false` por defecto, así que basta con no tocarlo. El vídeo anotado en `results/videos/` y las fotos en `results/fotos/` se generan igual, con o sin preview.
 3. Decidir la política de reinicio según la fuente: con un vídeo, `Restart=on-failure` (por defecto) no lo vuelve a lanzar si termina bien; con `--camera`, el proceso no termina solo (sigue en directo), así que `on-failure` solo lo reinicia si falla — tiene sentido dejarlo así o cambiarlo a `always` si se quiere que se recupere también de una caída limpia de la cámara.
 
 Con `--camera` y `--mqtt true` (el caso normal de este servicio), el proceso arranca y se queda esperando el comando `start_recording` del panel de control — no analiza nada hasta que se lo mandan (ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Esto es intencional: el servicio puede estar `enable --now` de forma permanente sin grabar nada hasta que se necesite.
