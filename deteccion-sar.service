@@ -12,7 +12,10 @@ Environment=PYTHONUNBUFFERED=1
 # esperando 'start_recording' del panel (ver README). Para procesar un
 # video de fichero en su lugar, sustituir "--camera 0" por su ruta.
 # --preview false es obligatorio aqui: no hay pantalla en un servicio systemd.
-ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false
+# --runtime ncnn: motor mas ligero/rapido para la CPU ARM de la Pi. Requiere
+# haber generado antes weights/best_ncnn_model/ con conversion/exportar_ncnn.py
+# (si no existe, el servicio falla al arrancar con un aviso claro).
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false --runtime ncnn
 Restart=always
 RestartSec=10
 
