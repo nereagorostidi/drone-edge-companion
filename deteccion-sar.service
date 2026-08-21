@@ -8,10 +8,12 @@ Type=simple
 User=nerea
 WorkingDirectory=/home/nerea/drone-edge-companion
 Environment=PYTHONUNBUFFERED=1
-# Editar la ruta del video antes de instalar: no hay pantalla en un
-# servicio systemd, por eso --preview false es obligatorio aqui.
-ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py /home/nerea/drone-edge-companion/samples/vuelo1.mp4 --preview false
-Restart=on-failure
+# Por defecto usa la camara en vivo (indice 0); no arranca solo, se queda
+# esperando 'start_recording' del panel (ver README). Para procesar un
+# video de fichero en su lugar, sustituir "--camera 0" por su ruta.
+# --preview false es obligatorio aqui: no hay pantalla en un servicio systemd.
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false
+Restart=always
 RestartSec=10
 
 [Install]
