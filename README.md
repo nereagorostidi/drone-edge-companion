@@ -256,7 +256,7 @@ Cada proceso tiene ya su propio fichero `.service` en el repositorio, listo para
 | `sensor-sar.service` | `sensor.py` (dominio `ambiental`) | `always` — captura continua |
 | `sistema-sar.service` | `sistema.py` (dominio `sistema`) | `always` — captura continua |
 | `vuelo-sar.service` | `vuelo.py` (dominio `vuelo`) | `always` — captura continua |
-| `deteccion-sar.service` | `deteccion.py` (dominio `deteccion`) | `on-failure` — con un vídeo, procesa un fichero concreto y termina; con `--camera` y MQTT, queda en marcha indefinidamente a la espera de `start_recording`/`stop_recording` |
+| `deteccion-sar.service` | `deteccion.py` (dominio `deteccion`) | `always` — cámara por defecto: queda en marcha indefinidamente a la espera de `start_recording`/`stop_recording` |
 | `receptor-sar.service` | `receptor.py` (comandos) | `on-failure` |
 
 Instalación de cualquiera de los servicios de captura continua (`sensor-sar`, `sistema-sar`, `vuelo-sar`) o del receptor — mismo patrón para los cinco, cambiando el nombre del fichero:
@@ -268,14 +268,14 @@ sudo systemctl enable --now sensor-sar.service
 Con `vuelo-sar.service` en concreto, comprobar antes que el Pixhawk (o Mission Planner en SITL) ya está reenviando por MAVLink (ver [Requisitos](#requisitos)): el `ExecStart` no lleva `--fake`, así que sin eso disponible el servicio se queda esperando el heartbeat indefinidamente en vez de arrancar.
 
 ### Particularidad de `deteccion-sar.service`
-A diferencia de los demás, `deteccion.py` no es un colector en bucle infinito sobre un fichero: recibe como fuente O bien una ruta de vídeo O bien una cámara en vivo (`--camera`, ver [Ejecución manual](#ejecución-manual)). Antes de instalar `deteccion-sar.service` hay que:
+A diferencia de los demás, `deteccion.py` no es un colector en bucle infinito sobre un fichero: recibe como fuente O bien una ruta de vídeo O bien una cámara en vivo (`--camera`, ver [Ejecución manual](#ejecución-manual)). `deteccion-sar.service` trae **la cámara (índice 0) como fuente por defecto** — es el caso normal de este servicio: siempre disponible, sin grabar nada hasta que el panel lo pida. Antes de instalar `deteccion-sar.service` conviene revisar:
 
-1. Editar la línea `ExecStart` del fichero: dejar la ruta de un vídeo (por defecto trae el placeholder `samples/vuelo1.mp4`) o sustituirla por `--camera 0` (u otro índice/ruta de dispositivo) para analizar en directo desde la cámara de la Pi.
+1. El índice/ruta de la cámara en `ExecStart` (`--camera 0` por defecto): cambiarlo si la Pi tiene más de una cámara o el índice `0` no es el correcto (`ls /dev/video*` para comprobar). Si en su lugar quieres procesar un vídeo de fichero con este servicio (caso raro — pensado sobre todo para pruebas manuales por SSH, no para el despliegue), sustituye `--camera 0` por la ruta del vídeo y ten en cuenta que entonces `start_recording`/`stop_recording` no tienen efecto (arranca directo, ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)).
 2. No añadir `--preview true`: un servicio systemd no tiene pantalla, así que la ventana de vista previa (`cv2.imshow`) fallaría si se activa. `--preview` es `false` por defecto, así que basta con no tocarlo. El vídeo anotado en `results/videos/` y las fotos en `results/fotos/` se generan igual, con o sin preview.
-3. Decidir la política de reinicio según la fuente: con un vídeo, `Restart=on-failure` (por defecto) no lo vuelve a lanzar si termina bien; con `--camera`, el proceso no termina solo (sigue en directo), así que `on-failure` solo lo reinicia si falla — tiene sentido dejarlo así o cambiarlo a `always` si se quiere que se recupere también de una caída limpia de la cámara.
+3. La política de reinicio: por defecto `Restart=always`, para que el servicio se recupere también de una caída limpia de la cámara (no solo de un fallo) — tiene sentido con la cámara como fuente permanente. Si en su lugar apuntas a un vídeo de fichero, probablemente quieras `Restart=on-failure` (que no lo relance si termina bien).
 4. Comprobar `ffmpeg` y las variables `STREAM_*` si se quiere streaming en directo (`--stream` es `true` por defecto — ver [Requisitos](#requisitos)); si no interesa para este despliegue, añadir `--stream false` al `ExecStart` para no intentarlo en cada sesión.
 
-Con `--camera` y `--mqtt true` (el caso normal de este servicio), el proceso arranca y se queda esperando el comando `start_recording` del panel de control — no analiza nada hasta que se lo mandan (ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Esto es intencional: el servicio puede estar `enable --now` de forma permanente sin grabar nada hasta que se necesite.
+Con la cámara como fuente y `--mqtt true` (el caso por defecto de este servicio), el proceso arranca y se queda esperando el comando `start_recording` del panel de control — no analiza nada hasta que se lo mandan (ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Esto es intencional: el servicio puede estar `enable --now` de forma permanente sin grabar nada hasta que se necesite.
 
 ```bash
 sudo cp deteccion-sar.service /etc/systemd/system/
