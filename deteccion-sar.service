@@ -10,7 +10,7 @@ WorkingDirectory=/home/nerea/drone-edge-companion
 Environment=PYTHONUNBUFFERED=1
 # Editar la ruta del video antes de instalar: no hay pantalla en un
 # servicio systemd, por eso --preview false es obligatorio aqui.
-ExecStart=/home/nerea/bme680-env/bin/python -u /home/nerea/drone-edge-companion/deteccion.py /home/nerea/drone-edge-companion/samples/vuelo1.mp4 --preview false
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py /home/nerea/drone-edge-companion/samples/vuelo1.mp4 --preview false
 Restart=on-failure
 RestartSec=10
 

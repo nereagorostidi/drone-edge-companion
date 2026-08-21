@@ -1,3 +1,4 @@
 *.db
 posicion_actual.json
 .env
+venv/
