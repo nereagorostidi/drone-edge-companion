@@ -39,8 +39,9 @@ posicion_actual.json que escribe vuelo.py. Así el mensaje lleva la zona
 (posición del dron) y los píxeles de la caja dentro del fotograma.
 
 El envío MQTT se controla con --mqtt (por defecto true) y la ventana de
-vista previa con --preview (por defecto true). El vídeo anotado de salida
-se genera SIEMPRE, se muestre o no el preview, en:
+vista previa con --preview (por defecto FALSE: hay que activarla a mano
+con --preview true). El vídeo anotado de salida se genera igual, se
+muestre o no el preview, en:
     results/videos/{dron_id}_{video}_{fecha}.mp4
 
 Cada vez que se envía una alerta (respetando el --anti-spam) se guarda
@@ -65,13 +66,13 @@ y p95, vid_stride), detecciones (alertas emitidas y confianza media) y
 timestamp_inicio/timestamp_fin de la sesión (ver publicar_resumen_video).
 
 Uso:
-    python3 deteccion.py vuelo1.mp4                  # MQTT y preview (por defecto)
+    python3 deteccion.py vuelo1.mp4                  # MQTT activado, SIN preview (por defecto)
     python3 deteccion.py vuelo1.mp4 --mqtt false     # no envía por MQTT
-    python3 deteccion.py vuelo1.mp4 --preview false  # sin ventana (output igual)
+    python3 deteccion.py vuelo1.mp4 --preview true   # con ventana de vista previa (output igual)
     python3 deteccion.py vuelo1.mp4 --anti-spam 3    # una alerta como mucho cada 3 s
     python3 deteccion.py --camera 0                  # cámara en vivo (índice 0); con MQTT, espera 'start_recording' del panel
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
-    python3 deteccion.py --camera 0 --preview false  # cámara en vivo, sin ventana (para systemd)
+    python3 deteccion.py --camera 0 --preview true   # cámara en vivo, con ventana (NO usar en systemd)
     python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
     python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere conversion/exportar_onnx.py antes)
     python3 deteccion.py vuelo1.mp4 --runtime onnx-int8  # carga weights/best.int8.onnx (cuantizado, requiere conversion/cuantizar_onnx.py antes)
@@ -134,8 +135,8 @@ parser.add_argument('--augment', action=argparse.BooleanOptionalAction, default=
                      help='Test-time augmentation: analiza cada frame varias veces (flips/escalas) y combina resultados, mas preciso pero mas lento. Usa --no-augment para desactivarlo')
 parser.add_argument('--mqtt', type=_str2bool, default=True,
                      help='Enviar las detecciones por MQTT (true/false). Con false no envia nada por MQTT')
-parser.add_argument('--preview', type=_str2bool, default=True,
-                     help='Mostrar la ventana de vista previa (true/false). El video de salida en output/ se genera SIEMPRE, se muestre o no el preview')
+parser.add_argument('--preview', type=_str2bool, default=False,
+                     help='Mostrar la ventana de vista previa (true/false). El video de salida en output/ se genera igual, se muestre o no el preview')
 parser.add_argument('--anti-spam', type=float, default=5.0,
                      help='Segundos minimos entre envios de alertas por MQTT, para no saturar el topic con la misma persona en frames seguidos')
 parser.add_argument('--overlay', type=_str2bool, default=True,
