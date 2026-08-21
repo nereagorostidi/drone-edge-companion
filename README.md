@@ -19,6 +19,7 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `sistema.py` — Dominio `sistema`: métricas del propio nodo edge (CPU, RAM, disco, throttling, uptime).
 - `vuelo.py` — Dominio `vuelo`: telemetría de vuelo (de momento con datos simulados, a la espera del Pixhawk) y escritura de `posicion_actual.json`.
 - `deteccion.py` — Dominio `deteccion`: detección de personas (YOLO) sobre un vídeo o una cámara en vivo (`--camera`), con alerta MQTT georreferenciada.
+- `streaming.py` — Clase `EmisorRTSP`, usada por `deteccion.py` (`--stream`) para emitir el vídeo anotado en directo hacia un servidor MediaMTX por RTSP, vía `ffmpeg`. Es un extra a prueba de fallos: si `ffmpeg` no está instalado, la red falla o MediaMTX no responde, se desactiva sola y la detección (vídeo local + alertas) sigue igual.
 - `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto.
 - `weights/` — Pesos del modelo YOLO entrenado: `best.pt` (PyTorch) y, opcionalmente, `best.onnx` (ONNX), `best.int8.onnx` (ONNX cuantizado) y `best_ncnn_model/` (NCNN), usados por `deteccion.py` según `--runtime`.
 - `conversion/exportar_onnx.py` — Utilidad puntual para generar `weights/best.onnx` a partir de `weights/best.pt`; volver a ejecutarlo cada vez que haya un `best.pt` nuevo (reentrenamiento).
@@ -99,6 +100,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Para `vuelo.py` (y el servicio `vuelo-sar.service`, que arranca sin `--fake`): Pixhawk conectado, o Mission Planner en modo SITL reenviando por MAVLink al puerto de `MAVLINK_CONN_VUELO`. Sin eso disponible al arrancar, el proceso se queda esperando el heartbeat MAVLink indefinidamente (no falla, simplemente no arranca del todo); para simular sin autopiloto, usar `--fake` (ver [Ejecución manual](#ejecución-manual))
 - Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `conversion/exportar_onnx.py`; con `--runtime onnx-int8`, además `weights/best.int8.onnx`, generado con `conversion/cuantizar_onnx.py`; con `--runtime ncnn`, además `weights/best_ncnn_model/`, generado con `conversion/exportar_ncnn.py`)
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
+- Para `deteccion.py --stream` (activado por defecto): `ffmpeg` instalado como binario de sistema (`sudo apt install ffmpeg` en la Pi) — no está en `requirements.txt` porque no es un paquete de Python. Además, `STREAM_HOST`/`STREAM_USER`/`STREAM_PASS` en el `.env` (ver [Variables de entorno](#variables-de-entorno)) y un servidor MediaMTX accesible en esa dirección, puerto `8554`. Sin `ffmpeg` o sin esas variables, el streaming se desactiva solo y avisa por consola — no impide que `deteccion.py` funcione
 ## Conexionado del sensor
 | Pin del sensor | Pin de la Raspberry Pi | Nº de pin |
 |---|---|---|
@@ -126,6 +128,7 @@ cd drone-edge-companion
 python3 -m venv /home/nerea/bme680-env
 source /home/nerea/bme680-env/bin/activate
 pip install -r requirements.txt
+sudo apt install -y ffmpeg   # necesario para deteccion.py --stream (streaming en directo)
 cp .env.example .env   # edita con tus credenciales
 ```
 
@@ -146,6 +149,11 @@ cp .env.example .env   # edita con tus credenciales
 | `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos`. Debe ser el mismo valor que `DRON_ID`, y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
 | `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink (`udpin:0.0.0.0:14550` contra el SITL) |
 | `MAVLINK_CONN_VUELO` | `vuelo.py` | Cadena de conexión MAVLink para leer telemetría (por defecto `udpin:0.0.0.0:14552`; debe ser un puerto distinto al de `MAVLINK_CONN`). No se usa con `--fake` |
+| `STREAM_HOST` | `deteccion.py` (`--stream`) | IP o dominio del servidor MediaMTX. Obligatoria para que el streaming se active (si falta, se desactiva solo con un aviso) |
+| `STREAM_USER` / `STREAM_PASS` | `deteccion.py` (`--stream`) | Credenciales RTSP contra MediaMTX. Obligatorias igual que `STREAM_HOST` |
+| `STREAM_PATH` | `deteccion.py` (`--stream`) | Nombre del stream en MediaMTX (por defecto `dron_live`); forma la URL `rtsp://.../{STREAM_PATH}` |
+| `STREAM_ANCHO` / `STREAM_ALTO` | `deteccion.py` (`--stream`) | Resolución del vídeo emitido en directo (por defecto 640×360) — menor que la del vídeo local, para no saturar el enlace |
+| `STREAM_FPS` | `deteccion.py` (`--stream`) | FPS del streaming en directo (por defecto 12) |
 
 El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente. Esto incluye `DRONE_ID`/`DRON_ID`: si no coinciden entre sí (y con el valor elegido en el desplegable del panel de control), el mensaje se publica pero ningún proceso de este Pi lo recibe.
 
@@ -189,6 +197,11 @@ Por defecto (`--overlay true`) esa foto lleva superpuestas las coordenadas del d
 python deteccion.py samples/vuelo1.mp4 --overlay false   # fotos sin coordenadas/fecha superpuestas
 ```
 
+Por defecto (`--stream true`) se emite además el vídeo anotado en directo hacia MediaMTX (`streaming.py`, vía `ffmpeg`, RTSP), en paralelo a la grabación local — más ligero (por defecto 640×360 a 12 FPS, configurable con `STREAM_ANCHO`/`STREAM_ALTO`/`STREAM_FPS`) que el vídeo guardado en `results/videos/`. Es un extra a prueba de fallos: si falta `ffmpeg`, faltan `STREAM_HOST`/`STREAM_USER`/`STREAM_PASS` en el `.env`, o se cae la conexión a mitad de sesión, se desactiva solo con un aviso por consola y la detección (vídeo local + alertas MQTT) sigue sin cortarse:
+```bash
+python deteccion.py samples/vuelo1.mp4 --stream false   # sin streaming en directo, solo vídeo local
+```
+
 Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Con `--runtime onnx` carga en su lugar `weights/best.onnx` (más ligero y rápido de cargar), que hay que generar antes con `conversion/exportar_onnx.py`; con `--runtime onnx-int8` carga `weights/best.int8.onnx`, la versión cuantizada a INT8 (aún más ligera y rápida en CPU, a costa de algo de precisión), que hay que generar antes con `conversion/cuantizar_onnx.py`; con `--runtime ncnn` carga la carpeta `weights/best_ncnn_model/`, un motor optimizado para CPUs ARM (Raspberry Pi incluida, a veces más rápido que ONNX Runtime en ese hardware), que hay que generar antes con `conversion/exportar_ncnn.py`:
 ```bash
 python conversion/exportar_onnx.py                          # genera weights/best.onnx a partir de weights/best.pt
@@ -216,7 +229,7 @@ Con `--camera` **y** `--mqtt true` (el caso real: el servicio systemd), `detecci
 python deteccion.py --camera 0
 # -> "A la espera de 'start_recording' desde el panel (topic 'dronsar/dron-02/deteccion/config')..."
 ```
-Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión en `results/videos/` con su propio timestamp— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
+Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT, y streaming en directo si `--stream` está activado); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión en `results/videos/` con su propio timestamp y cortando el streaming— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
 
 Con un fichero de vídeo, o con `--mqtt false`, no hay nada que esperar: `deteccion.py` arranca directo, como siempre (estos comandos no tienen efecto en ese caso).
 
@@ -258,6 +271,7 @@ A diferencia de los demás, `deteccion.py` no es un colector en bucle infinito s
 1. Editar la línea `ExecStart` del fichero: dejar la ruta de un vídeo (por defecto trae el placeholder `samples/vuelo1.mp4`) o sustituirla por `--camera 0` (u otro índice/ruta de dispositivo) para analizar en directo desde la cámara de la Pi.
 2. No añadir `--preview true`: un servicio systemd no tiene pantalla, así que la ventana de vista previa (`cv2.imshow`) fallaría si se activa. `--preview` es `false` por defecto, así que basta con no tocarlo. El vídeo anotado en `results/videos/` y las fotos en `results/fotos/` se generan igual, con o sin preview.
 3. Decidir la política de reinicio según la fuente: con un vídeo, `Restart=on-failure` (por defecto) no lo vuelve a lanzar si termina bien; con `--camera`, el proceso no termina solo (sigue en directo), así que `on-failure` solo lo reinicia si falla — tiene sentido dejarlo así o cambiarlo a `always` si se quiere que se recupere también de una caída limpia de la cámara.
+4. Comprobar `ffmpeg` y las variables `STREAM_*` si se quiere streaming en directo (`--stream` es `true` por defecto — ver [Requisitos](#requisitos)); si no interesa para este despliegue, añadir `--stream false` al `ExecStart` para no intentarlo en cada sesión.
 
 Con `--camera` y `--mqtt true` (el caso normal de este servicio), el proceso arranca y se queda esperando el comando `start_recording` del panel de control — no analiza nada hasta que se lo mandan (ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Esto es intencional: el servicio puede estar `enable --now` de forma permanente sin grabar nada hasta que se necesite.
 

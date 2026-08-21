@@ -98,6 +98,7 @@ import cv2
 from ultralytics import YOLO
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
+from streaming import EmisorRTSP
 
 
 # =====================================================================
@@ -141,6 +142,8 @@ parser.add_argument('--anti-spam', type=float, default=5.0,
                      help='Segundos minimos entre envios de alertas por MQTT, para no saturar el topic con la misma persona en frames seguidos')
 parser.add_argument('--overlay', type=_str2bool, default=True,
                      help='Añadir a la foto guardada (results/fotos/) la posicion del dron y la fecha/hora de la deteccion (true/false). No afecta al video anotado ni al preview')
+parser.add_argument('--stream', type=_str2bool, default=True,
+                     help='Emitir el vídeo anotado en directo hacia MediaMTX (true/false), en paralelo a la grabación local')
 parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn'), default='pt',
                      help="Motor de inferencia: 'pt' carga weights/best.pt via PyTorch (el de siempre); "
                           "'onnx' carga weights/best.onnx via ONNX Runtime (mas ligero/rapido, requiere "
@@ -197,6 +200,23 @@ if MQTT_ON:
 
 # Antigüedad máxima (s) de la posición para darla por buena sin avisar.
 POS_MAX_EDAD = 5.0
+
+# --- Config del streaming en directo (solo si --stream) ---
+STREAM_ON = args.stream
+STREAM_HOST = os.getenv("STREAM_HOST")
+STREAM_USER = os.getenv("STREAM_USER")
+STREAM_PASS = os.getenv("STREAM_PASS")
+STREAM_PATH = os.getenv("STREAM_PATH", "dron_live")
+STREAM_ANCHO = int(os.getenv("STREAM_ANCHO", 640))
+STREAM_ALTO = int(os.getenv("STREAM_ALTO", 360))
+STREAM_FPS = int(os.getenv("STREAM_FPS", 12))
+
+# Si se pide streaming pero faltan datos del .env, se avisa y se desactiva
+# (sin tumbar el script: el vídeo en directo es un extra, no algo crítico).
+if STREAM_ON and not all([STREAM_HOST, STREAM_USER, STREAM_PASS]):
+    print("Aviso: --stream true pero faltan STREAM_HOST/USER/PASS en el .env; "
+          "se desactiva el streaming en directo.")
+    STREAM_ON = False
 
 
 # =====================================================================
@@ -558,6 +578,7 @@ if ESPERA_COMANDO:
 ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam (persiste entre sesiones)
 parar_por_usuario = False   # se puso a True al pulsar 'q' en el preview: para todo, no solo la sesion
 writer = None   # definido aqui para que el finally pueda cerrarlo aunque no haya arrancado ninguna sesion
+emisor = None   # emisor de streaming de la sesión en curso (como writer, pero para el directo)
 
 
 # =====================================================================
@@ -631,7 +652,17 @@ try:
                     fps_original / VID_STRIDE,
                     (w, h),
                 )
+                # Arrancamos el emisor en directo a la vez que el vídeo local,
+                # una sola vez por sesión (cuando se crea el writer).
+                if STREAM_ON:
+                    emisor = EmisorRTSP(STREAM_HOST, STREAM_USER, STREAM_PASS,
+                                        STREAM_PATH, STREAM_ANCHO, STREAM_ALTO, STREAM_FPS)
+                    emisor.abrir()
             writer.write(annotated_frame)
+
+            # Copia ligera en directo hacia MediaMTX (si falla, no afecta a lo demás).
+            if STREAM_ON and emisor is not None:
+                emisor.enviar(annotated_frame)
 
             # ----- NUEVO: detección -> alerta MQTT (con anti-spam) -----
             if MQTT_ON and r.boxes is not None and len(r.boxes) > 0:
@@ -677,6 +708,10 @@ try:
         if writer is not None:
             writer.release()
             writer = None
+        # Cerramos el emisor en directo de esta sesión (si estaba activo).
+        if STREAM_ON and emisor is not None:
+            emisor.cerrar()
+            emisor = None
         cv2.destroyAllWindows()
 
         # Liberar la cámara (o el fichero) de ESTA sesión. Al cortar el
@@ -739,6 +774,8 @@ finally:
     # Cierre ordenado (también si se interrumpe con Ctrl+C a media sesión).
     if writer is not None:
         writer.release()
+    if STREAM_ON and emisor is not None:
+        emisor.cerrar()
     cv2.destroyAllWindows()
     if MQTT_ON:
         reenviar()                 # último intento de vaciar el buffer
