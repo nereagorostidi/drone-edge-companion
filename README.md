@@ -96,7 +96,7 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 - Sensor BME680 conectado por I2C (dirección `0x76`), para el dominio `ambiental`
 - Python 3.10+
 - Broker MQTT accesible (Mosquitto en el EC2)
-- Entorno virtual en `/home/nerea/bme680-env`
+- Entorno virtual en `/home/nerea/drone-edge-companion/venv`
 - Para `vuelo.py` (y el servicio `vuelo-sar.service`, que arranca sin `--fake`): Pixhawk conectado, o Mission Planner en modo SITL reenviando por MAVLink al puerto de `MAVLINK_CONN_VUELO`. Sin eso disponible al arrancar, el proceso se queda esperando el heartbeat MAVLink indefinidamente (no falla, simplemente no arranca del todo); para simular sin autopiloto, usar `--fake` (ver [Ejecución manual](#ejecución-manual))
 - Para `deteccion.py`: pesos del modelo en `weights/best.pt` (con `--runtime onnx`, además `weights/best.onnx`, generado con `conversion/exportar_onnx.py`; con `--runtime onnx-int8`, además `weights/best.int8.onnx`, generado con `conversion/cuantizar_onnx.py`; con `--runtime ncnn`, además `weights/best_ncnn_model/`, generado con `conversion/exportar_ncnn.py`)
 - Para `deteccion.py --camera`: cámara expuesta como dispositivo V4L2 (`/dev/video0`); con la cámara oficial de la Pi puede requerir `sudo modprobe bcm2835-v4l2` o la capa de compatibilidad de libcamera
@@ -121,12 +121,12 @@ sudo apt install -y i2c-tools
 i2cdetect -y 1        # debe aparecer 76 en la cuadrícula
 ```
 
-Clonar el repositorio y preparar el entorno (que vive **fuera** de la carpeta del proyecto, en la ruta que espera el servicio systemd):
+Clonar el repositorio y preparar el entorno (dentro de la propia carpeta del proyecto, `venv/`, en la ruta que esperan los servicios systemd):
 ```bash
 git clone git@github.com:<tu-usuario>/drone-edge-companion.git
 cd drone-edge-companion
-python3 -m venv /home/nerea/bme680-env
-source /home/nerea/bme680-env/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 sudo apt install -y ffmpeg   # necesario para deteccion.py --stream (streaming en directo)
 cp .env.example .env   # edita con tus credenciales
@@ -164,19 +164,19 @@ Los scripts de dominio y `receptor.py` se ejecutan en paralelo y son independien
 
 Telemetría ambiental (el flag `-i` define el intervalo entre lecturas en segundos):
 ```bash
-source /home/nerea/bme680-env/bin/activate
+source /home/nerea/drone-edge-companion/venv/bin/activate
 python sensor.py -i 30
 ```
 
 Estado del sistema:
 ```bash
-source /home/nerea/bme680-env/bin/activate
+source /home/nerea/drone-edge-companion/venv/bin/activate
 python sistema.py -i 10
 ```
 
 Telemetría de vuelo (por defecto lee MAVLink real; con `--fake`, datos simulados):
 ```bash
-source /home/nerea/bme680-env/bin/activate
+source /home/nerea/drone-edge-companion/venv/bin/activate
 python vuelo.py -i 1              # MAVLink real (Pixhawk o Mission Planner en SITL)
 python vuelo.py -i 1 --fake       # datos simulados, sin autopiloto
 ```
@@ -184,7 +184,7 @@ Para leer del SITL, Mission Planner necesita reenviar por UDP a la Pi en un puer
 
 Detección de personas sobre un vídeo (requiere `weights/best.pt`):
 ```bash
-source /home/nerea/bme680-env/bin/activate
+source /home/nerea/drone-edge-companion/venv/bin/activate
 python deteccion.py samples/vuelo1.mp4                    # MQTT activado, SIN ventana de preview (por defecto)
 python deteccion.py samples/vuelo1.mp4 --mqtt false       # solo detección + vídeo anotado, sin MQTT
 python deteccion.py samples/vuelo1.mp4 --preview true     # con ventana de vista previa; el vídeo en results/videos/ se genera igual
@@ -237,7 +237,7 @@ Con un fichero de vídeo, o con `--mqtt false`, no hay nada que esperar: `detecc
 
 Receptor de comandos:
 ```bash
-source /home/nerea/bme680-env/bin/activate
+source /home/nerea/drone-edge-companion/venv/bin/activate
 python receptor.py
 ```
 
