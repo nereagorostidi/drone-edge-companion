@@ -41,12 +41,14 @@ posicion_actual.json que escribe vuelo.py. Así el mensaje lleva la zona
 El envío MQTT se controla con --mqtt (por defecto true) y la ventana de
 vista previa con --preview (por defecto FALSE: hay que activarla a mano
 con --preview true). El vídeo anotado de salida se genera igual, se
-muestre o no el preview, en:
-    results/videos/{dron_id}_{video}_{fecha}.mp4
+muestre o no el preview, en (VIDEOS_DIR configurable por .env, por
+defecto results/videos):
+    {VIDEOS_DIR}/{dron_id}_{video}_{fecha}.mp4
 
 Cada vez que se envía una alerta (respetando el --anti-spam) se guarda
-además el frame anotado de esa detección como JPEG en:
-    results/fotos/{dron_id}_{fecha}.jpg
+además el frame anotado de esa detección como JPEG en (FOTOS_DIR
+configurable por .env, por defecto results/fotos):
+    {FOTOS_DIR}/{dron_id}_{fecha}.jpg
 El nombre de ese fichero viaja también dentro del JSON de la alerta MQTT
 (campo 'foto'), para poder relacionar cada alerta con su imagen. Con
 --overlay (por defecto true) esa foto lleva además superpuestas las
@@ -172,6 +174,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("BUFFER_DB", os.path.join(BASE_DIR, f"{DOMINIO}.db"))
 # Mismo fichero de posición que escribe vuelo.py.
 POS_FILE = os.getenv("POS_FILE", os.path.join(BASE_DIR, "posicion_actual.json"))
+
+# Carpetas de salida (vídeos anotados y fotos de alerta). Configurables por
+# si el día de mañana se monta almacenamiento aparte (p. ej. /media/...) sin
+# tener que tocar código: basta con fijar VIDEOS_DIR/FOTOS_DIR en el .env.
+VIDEOS_DIR = os.getenv("VIDEOS_DIR", os.path.join(BASE_DIR, "results", "videos"))
+FOTOS_DIR = os.getenv("FOTOS_DIR", os.path.join(BASE_DIR, "results", "fotos"))
 
 TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
@@ -419,10 +427,9 @@ def guardar_foto(frame, pos, ts):
     """
     if args.overlay:
         frame = _dibujar_overlay(frame, pos, ts)
-    fotos_dir = os.path.join('results', 'fotos')
-    os.makedirs(fotos_dir, exist_ok=True)
+    os.makedirs(FOTOS_DIR, exist_ok=True)
     nombre = f"{DRON_ID or 'sindron'}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-    cv2.imwrite(os.path.join(fotos_dir, nombre), frame)
+    cv2.imwrite(os.path.join(FOTOS_DIR, nombre), frame)
     return nombre
 
 
@@ -615,14 +622,13 @@ try:
         # Con zona horaria (igual que el resto de timestamps del script) para
         # que timestamp_inicio del resumen sea comparable a timestamp_fin.
         FECHA_INICIO = datetime.now().astimezone()
-        videos_dir = os.path.join('results', 'videos')
-        os.makedirs(videos_dir, exist_ok=True)
+        os.makedirs(VIDEOS_DIR, exist_ok=True)
         fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
         # Nombre fijado ya aquí (no al escribir el primer frame): así el
         # resumen de la sesión tiene un nombre de fichero aunque no se haya
         # detectado/escrito ni un solo frame (sesión cortada casi al instante).
         nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
-        output_path = os.path.join(videos_dir, nombre_video)
+        output_path = os.path.join(VIDEOS_DIR, nombre_video)
 
         # ------------------- BENCHMARK: contadores de esta sesión -------------------
         tiempos_inferencia = []

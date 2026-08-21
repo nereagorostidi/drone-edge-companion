@@ -26,8 +26,8 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `conversion/cuantizar_onnx.py` — Utilidad puntual para generar `weights/best.int8.onnx` (cuantización dinámica a INT8) a partir de `weights/best.onnx`; más ligero y rápido en CPU, a costa de algo de precisión. Volver a ejecutarlo cada vez que se regenere `best.onnx`.
 - `conversion/exportar_ncnn.py` — Utilidad puntual para generar `weights/best_ncnn_model/` a partir de `weights/best.pt`; NCNN es un motor de inferencia optimizado para CPUs ARM (Raspberry Pi incluida), a veces más rápido que ONNX Runtime en ese hardware. Volver a ejecutarlo cada vez que haya un `best.pt` nuevo.
 - `samples/` — Vídeos de prueba para `deteccion.py`.
-- `results/videos/` — Vídeos anotados generados por `deteccion.py` (se crea automáticamente; excluida de git).
-- `results/fotos/` — Fotogramas JPEG de cada alerta enviada por `deteccion.py` (se crea automáticamente; excluida de git).
+- `results/videos/` — Vídeos anotados generados por `deteccion.py` (se crea automáticamente; excluida de git). Ruta por defecto, configurable con `VIDEOS_DIR` en el `.env`.
+- `results/fotos/` — Fotogramas JPEG de cada alerta enviada por `deteccion.py` (se crea automáticamente; excluida de git). Ruta por defecto, configurable con `FOTOS_DIR` en el `.env`.
 - `posicion_actual.json` — Última posición conocida del dron; la escribe `vuelo.py` y la lee `deteccion.py`. Se genera en tiempo de ejecución.
 - `sensor-sar.service` — Servicio systemd del dominio `ambiental` (`sensor.py`).
 - `sistema-sar.service` — Servicio systemd del dominio `sistema` (`sistema.py`).
@@ -144,6 +144,8 @@ cp .env.example .env   # edita con tus credenciales
 | `BUFFER_VUELO` | `vuelo.py` | Ruta del buffer SQLite del dominio `vuelo` (por defecto `./vuelo.db`) |
 | `BUFFER_DB` | `deteccion.py` | Ruta del buffer SQLite del dominio `deteccion` (por defecto `./deteccion.db`) |
 | `POS_FILE` | `vuelo.py`, `deteccion.py` | Ruta del fichero de posición compartido (por defecto `./posicion_actual.json`) |
+| `VIDEOS_DIR` | `deteccion.py` | Carpeta donde se guardan los vídeos anotados (por defecto `results/videos`, dentro del repo). Cambiarla no requiere tocar código — útil para apuntar a almacenamiento aparte (p. ej. `/media/...`) |
+| `FOTOS_DIR` | `deteccion.py` | Carpeta donde se guardan las fotos de cada alerta (por defecto `results/fotos`, dentro del repo). Mismo caso de uso que `VIDEOS_DIR` |
 | `MQTT_TOPIC` | — | Legado del dominio único original; los dominios actuales construyen el topic a partir de `DRON_ID` |
 | `MQTT_BROKER` | `receptor.py` | IP elástica o dominio del servidor con el broker; debe ser el mismo valor que `EC2_HOST` |
 | `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos`. Debe ser el mismo valor que `DRON_ID`, y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
@@ -188,7 +190,7 @@ python deteccion.py samples/vuelo1.mp4 --mqtt false       # solo detección + v�
 python deteccion.py samples/vuelo1.mp4 --preview true     # con ventana de vista previa; el vídeo en results/videos/ se genera igual
 python deteccion.py -h                                    # todas las opciones (--conf, --vid-stride, --anti-spam...)
 ```
-El vídeo anotado de cada sesión se guarda en `results/videos/{DRON_ID}_{fuente}_{fecha}.mp4` (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `results/fotos/{DRON_ID}_{fecha}.jpg`, cuyo nombre viaja en el campo `foto` del JSON de la alerta.
+El vídeo anotado de cada sesión se guarda en `{VIDEOS_DIR}/{DRON_ID}_{fuente}_{fecha}.mp4` — por defecto `results/videos/`, configurable con `VIDEOS_DIR` en el `.env` (ver [Variables de entorno](#variables-de-entorno)) sin tocar código (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `{FOTOS_DIR}/{DRON_ID}_{fecha}.jpg` (por defecto `results/fotos/`, configurable con `FOTOS_DIR`), cuyo nombre viaja en el campo `foto` del JSON de la alerta.
 
 Para que las alertas lleven posición, `vuelo.py` debe estar en marcha en la misma carpeta (comparten `posicion_actual.json`); si no lo está, la alerta se envía igualmente pero sin coordenadas.
 
