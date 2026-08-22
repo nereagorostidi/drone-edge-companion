@@ -8,10 +8,15 @@ Type=simple
 User=nerea
 WorkingDirectory=/home/nerea/drone-edge-companion
 Environment=PYTHONUNBUFFERED=1
-# Editar la ruta del video antes de instalar: no hay pantalla en un
-# servicio systemd, por eso --preview false es obligatorio aqui.
-ExecStart=/home/nerea/bme680-env/bin/python -u /home/nerea/drone-edge-companion/deteccion.py /home/nerea/drone-edge-companion/samples/vuelo1.mp4 --preview false
-Restart=on-failure
+# Por defecto usa la camara en vivo (indice 0); no arranca solo, se queda
+# esperando 'start_recording' del panel (ver README). Para procesar un
+# video de fichero en su lugar, sustituir "--camera 0" por su ruta.
+# --preview false es obligatorio aqui: no hay pantalla en un servicio systemd.
+# --runtime ncnn: motor mas ligero/rapido para la CPU ARM de la Pi. Requiere
+# haber generado antes weights/best_ncnn_model/ con conversion/exportar_ncnn.py
+# (si no existe, el servicio falla al arrancar con un aviso claro).
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false --runtime ncnn
+Restart=always
 RestartSec=10
 
 [Install]

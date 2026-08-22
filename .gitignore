@@ -1,0 +1,7 @@
+*.db
+posicion_actual.json
+.env
+venv/
+results/
+__pycache__/
+*.pyc

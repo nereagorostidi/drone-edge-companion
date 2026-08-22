@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=nerea
 WorkingDirectory=/home/nerea/drone-edge-companion
-ExecStart=/home/nerea/bme680-env/bin/python /home/nerea/drone-edge-companion/receptor.py
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python /home/nerea/drone-edge-companion/receptor.py
 Restart=on-failure
 RestartSec=10
 

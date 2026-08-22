@@ -20,7 +20,7 @@ Esto materializa el principio EDGE-FIRST del proyecto: el nodo opera de
 forma autónoma y la comunicación con la estación base es oportunista.
 
 Este proceso cubre el DOMINIO AMBIENTAL. Publica en un topic jerárquico
-sar/{dron_id}/ambiental, donde el identificador del dron se lee del .env.
+dronsar/{dron_id}/ambiental, donde el identificador del dron se lee del .env.
 Cada dominio (vuelo, sistema, deteccion) sigue esta misma plantilla.
 
 Uso:
@@ -90,12 +90,16 @@ LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
 # El topic y el client_id se CONSTRUYEN a partir del identificador del dron,
 # no se escriben a mano. Así el mismo código sirve para cualquier unidad:
 # basta con cambiar DRON_ID en su .env.
-#   Topic jerárquico:   sar/{dron_id}/{dominio}
+#   Topic jerárquico:   dronsar/{dron_id}/{dominio}
 #   client_id ÚNICO:    {dron_id}-{dominio}
 # El client_id debe ser único por proceso: si dos clientes se conectan al
 # broker con el mismo id, Mosquitto los va expulsando en un bucle sin fin.
-TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
+
+# Topic de configuración remota (panel de control -> este script), con el
+# mismo esquema "dronsar/..." que usa receptor.py para comandos.
+CONFIG_TOPIC = f"dronsar/{DRON_ID}/sensor/config"
 
 # Validación temprana: si falta alguna variable obligatoria, el script
 # falla con un mensaje claro en lugar de con errores crípticos más tarde.
@@ -186,11 +190,58 @@ def leer_medida():
 
 
 # =====================================================================
+#  CONFIGURACIÓN REMOTA (panel de control -> este script)
+# =====================================================================
+# Intervalo de captura EN USO. Arranca con el valor de -i/--intervalo, pero
+# se puede actualizar en caliente desde el panel de control (ver on_message).
+intervalo_actual = args.intervalo
+
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    """Al conectar (o reconectar), nos suscribimos al topic de configuración."""
+    client.subscribe(CONFIG_TOPIC, qos=1)
+    print(f"Suscrito a '{CONFIG_TOPIC}'")
+
+
+def on_message(client, userdata, msg):
+    """Actualiza el intervalo de captura al recibir un comando de configuración.
+
+    Formato del payload (lo publica api.py, ver COMANDOS_CONFIG):
+        {"command": "set_sensor_interval", "params": {"interval_seconds": N}, ...}
+    """
+    global intervalo_actual
+    try:
+        orden = json.loads(msg.payload)
+    except json.JSONDecodeError:
+        print(f"Mensaje recibido en '{CONFIG_TOPIC}' que no es JSON válido; se ignora.")
+        return
+
+    command = orden.get("command")
+    cmd_id = orden.get("command_id", "?")
+    print(f"Comando de configuración recibido [{cmd_id}]: {command}")
+
+    if command != "set_sensor_interval":
+        print(f"  -> Comando desconocido '{command}' en este topic; se ignora.")
+        return
+
+    try:
+        nuevo_intervalo = float(orden["params"]["interval_seconds"])
+    except (KeyError, TypeError, ValueError):
+        print("  -> 'params.interval_seconds' ausente o inválido; se ignora.")
+        return
+
+    intervalo_actual = nuevo_intervalo
+    print(f"  -> Intervalo de captura actualizado a {intervalo_actual}s")
+
+
+# =====================================================================
 #  CLIENTE MQTT
 # =====================================================================
 # El client_id identifica este proceso ante el broker de forma única.
 client = mqtt.Client(client_id=CLIENT_ID,
                      callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+client.on_connect = on_connect
+client.on_message = on_message
 
 # Reconexión automática: si se cae la red, la librería reintenta sola,
 # esperando entre 1 y 30 s de forma progresiva. No hay que hacer nada
@@ -282,7 +333,7 @@ try:
     while True:
         guardar()
         reenviar()
-        time.sleep(args.intervalo)
+        time.sleep(intervalo_actual)
 
 except KeyboardInterrupt:
     # Cierre ordenado al pulsar Ctrl+C.

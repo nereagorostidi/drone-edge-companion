@@ -7,7 +7,7 @@
 =====================================================================
 
 Este script publica la telemetría de vuelo (posición, actitud, batería,
-GPS y modo) en sar/{dron_id}/vuelo y, además, escribe en cada ciclo el
+GPS y modo) en dronsar/{dron_id}/vuelo y, además, escribe en cada ciclo el
 fichero posicion_actual.json con la última posición conocida del dron,
 que es lo que el proceso de detección (deteccion.py) leerá para adjuntar
 la posición a cada alerta de persona.
@@ -15,26 +15,30 @@ la posición a cada alerta de persona.
 Sigue la MISMA plantilla que los demás colectores: captura, guarda en un
 buffer local SQLite y reenvía por MQTT con la lógica "store-and-forward".
 
-*** VERSIÓN PROVISIONAL CON DATOS SIMULADOS ***
-El Pixhawk todavía no está montado, así que de momento los datos se
-generan de forma simulada, centrados en el campo de vuelo de Galapagar
-(LECMUAV090). Cuando el Pixhawk esté disponible, solo hay que sustituir
-la función datos_simulados() por una lectura real por MAVLink (pymavlink);
-el resto del script (buffer, reenvío, fichero de posición) no cambia.
+Por defecto lee la telemetría REAL por MAVLink (pymavlink), ya sea del
+Pixhawk (conexión serie) o de Mission Planner actuando como SITL (conexión
+UDP). Con el flag --fake se generan datos simulados en su lugar, centrados
+en el campo de vuelo de Galapagar (LECMUAV090) — útil para probar el resto
+de la cadena (buffer, reenvío, fichero de posición) sin autopiloto a mano.
 
 Este proceso cubre el DOMINIO VUELO.
 
 Uso:
-    python3 vuelo.py                  # captura cada 1 s (por defecto)
+    python3 vuelo.py                  # datos REALES por MAVLink, cada 1 s
     python3 vuelo.py -i 0.3           # captura ~3 veces por segundo
+    python3 vuelo.py --fake           # datos SIMULADOS (sin autopiloto)
 
 Variables de entorno (.env):
-    DRON_ID     identificador del dron (p. ej. dron01)   [obligatoria]
-    EC2_HOST    IP o dominio del broker MQTT             [obligatoria]
-    MQTT_PORT   puerto MQTT (por defecto 1883)
-    BUFFER_DB   ruta del buffer SQLite (por defecto: vuelo.db)
-    POS_FILE    ruta del fichero de posición compartido
-    LOTE        filas enviadas por ciclo (por defecto 50)
+    DRON_ID           identificador del dron (p. ej. dron01)   [obligatoria]
+    EC2_HOST          IP o dominio del broker MQTT             [obligatoria]
+    MQTT_PORT         puerto MQTT (por defecto 1883)
+    BUFFER_DB         ruta del buffer SQLite (por defecto: vuelo.db)
+    POS_FILE          ruta del fichero de posición compartido
+    LOTE              filas enviadas por ciclo (por defecto 50)
+    MAVLINK_CONN_VUELO cadena de conexión MAVLink (por defecto:
+                       udpin:0.0.0.0:14552 — SITL/Mission Planner; para el
+                       Pixhawk real, algo como /dev/serial0 o /dev/ttyACM0).
+                       No se usa en modo --fake.
 """
 
 import os
@@ -47,6 +51,7 @@ import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
+from pymavlink import mavutil
 
 
 # =====================================================================
@@ -62,6 +67,9 @@ parser = argparse.ArgumentParser(
     description="Envío MQTT de la telemetría de vuelo con buffer local")
 parser.add_argument("-i", "--intervalo", type=float, default=1.0,
                     help="Segundos entre cada lectura (por defecto: 1)")
+parser.add_argument("--fake", action="store_true",
+                    help="Generar datos SIMULADOS en vez de leer MAVLink "
+                         "real (por defecto: MAVLink)")
 args = parser.parse_args()
 
 
@@ -80,8 +88,17 @@ LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
 # bloqueos que gestionar.
 POS_FILE = os.getenv("POS_FILE", "./posicion_actual.json")
 
+# Cadena de conexión MAVLink (solo se usa si NO se pasa --fake). Contra
+# Mission Planner en modo SITL es una conexión UDP entrante; el propio
+# Mission Planner reenvía por "SerialOutput -> UDP Outbound" a este puerto.
+# Debe ser un puerto DISTINTO al de receptor.py (MAVLINK_CONN), para que
+# ambos procesos puedan escuchar/hablar con el autopiloto a la vez. Con el
+# Pixhawk real conectado por cable, aquí va la ruta serie (p. ej.
+# "/dev/serial0" o "/dev/ttyACM0").
+MAVLINK_CONN_VUELO = os.getenv("MAVLINK_CONN_VUELO", "udpin:0.0.0.0:14552")
+
 # El topic y el client_id se construyen a partir del identificador del dron.
-TOPIC = f"sar/{DRON_ID}/{DOMINIO}"
+TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
 
 # Validación temprana de las variables obligatorias.
@@ -156,8 +173,8 @@ def _mover(lat, lon, dnorte_m, deste_m):
 def datos_simulados():
     """Genera una lectura de telemetría de vuelo plausible.
 
-    Cuando el Pixhawk esté disponible, esta función se sustituye por una
-    lectura real por MAVLink; el resto del script no cambia.
+    Solo se usa con --fake; sin ese flag se lee telemetría real por
+    MAVLink con datos_mavlink() (ver más abajo).
     """
     # Movimiento horizontal: paseo aleatorio de unos metros, acotado a un
     # radio de ~150 m alrededor del centro del campo.
@@ -191,6 +208,87 @@ def datos_simulados():
     }
 
 
+# =====================================================================
+#  CONEXIÓN MAVLINK (Pixhawk real o Mission Planner en modo SITL)
+# =====================================================================
+# Se conecta una sola vez, al arrancar, y se reutiliza en cada ciclo. Igual
+# que en receptor.py: mismo patrón de conexión y espera de heartbeat, pero
+# aquí es SOLO para leer telemetría (no se envían comandos).
+master = None
+if not args.fake:
+    print(f"Conectando al autopiloto en {MAVLINK_CONN_VUELO} ...")
+    master = mavutil.mavlink_connection(MAVLINK_CONN_VUELO)
+    master.wait_heartbeat()
+    print(f"Autopiloto conectado: sistema {master.target_system}, "
+          f"componente {master.target_component}")
+
+
+def _drenar_mavlink():
+    """Procesa todos los mensajes MAVLink ya recibidos, sin bloquear.
+
+    pymavlink guarda en master.messages el último mensaje visto de cada
+    tipo; con esto nos aseguramos de que ese caché está lo más al día
+    posible antes de leerlo, sin frenar el bucle principal si no ha
+    llegado nada nuevo.
+    """
+    while master.recv_match(blocking=False) is not None:
+        pass
+
+
+def datos_mavlink():
+    """Lee la última telemetría conocida del autopiloto por MAVLink.
+
+    Cada dato viene de un tipo de mensaje distinto (llegan a ritmos
+    diferentes), así que se usa el último valor visto de cada uno; si
+    alguno todavía no ha llegado (justo al arrancar), se devuelve 0 /
+    valor neutro en su lugar.
+    """
+    _drenar_mavlink()
+    msgs = master.messages
+
+    pos = msgs.get("GLOBAL_POSITION_INT")
+    att = msgs.get("ATTITUDE")
+    vfr = msgs.get("VFR_HUD")
+    gps = msgs.get("GPS_RAW_INT")
+    bat = msgs.get("SYS_STATUS")
+
+    lat = pos.lat / 1e7 if pos else 0.0
+    lon = pos.lon / 1e7 if pos else 0.0
+    alt_rel = pos.relative_alt / 1000.0 if pos else 0.0
+    rumbo = pos.hdg / 100.0 if pos and pos.hdg != 65535 else 0.0
+
+    vel_terreno = vfr.groundspeed if vfr else 0.0
+
+    roll = math.degrees(att.roll) if att else 0.0
+    pitch = math.degrees(att.pitch) if att else 0.0
+    yaw = math.degrees(att.yaw) % 360 if att else 0.0
+
+    bateria_v = bat.voltage_battery / 1000.0 if bat and bat.voltage_battery != 65535 else 0.0
+    bateria_pct = bat.battery_remaining if bat and bat.battery_remaining != -1 else 0
+    corriente_a = bat.current_battery / 100.0 if bat and bat.current_battery != -1 else 0.0
+
+    satelites = gps.satellites_visible if gps and gps.satellites_visible != 255 else 0
+    fix_type = gps.fix_type if gps else 0
+
+    return {
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "alt_rel": round(alt_rel, 1),
+        "vel_terreno": round(vel_terreno, 1),
+        "rumbo": round(rumbo, 1),
+        "roll": round(roll, 1),
+        "pitch": round(pitch, 1),
+        "yaw": round(yaw, 1),
+        "bateria_v": round(bateria_v, 2),
+        "bateria_pct": int(bateria_pct),
+        "corriente_a": round(corriente_a, 1),
+        "satelites": satelites,
+        "fix_type": fix_type,
+        "modo": master.flightmode or "DESCONOCIDO",
+        "armado": bool(master.motors_armed()),
+    }
+
+
 def escribir_posicion(lat, lon, alt_rel, ts):
     """Escribe la última posición conocida en posicion_actual.json.
 
@@ -217,7 +315,8 @@ print(f"Conectando al broker en {EC2_HOST} como '{CLIENT_ID}'...")
 client.connect_async(EC2_HOST, PORT, 60)
 client.loop_start()
 
-print(f"Dominio '{DOMINIO}' -> topic '{TOPIC}'  (datos SIMULADOS: Galapagar)")
+_modo_datos = "SIMULADOS: Galapagar" if args.fake else f"MAVLink real ({MAVLINK_CONN_VUELO})"
+print(f"Dominio '{DOMINIO}' -> topic '{TOPIC}'  (datos {_modo_datos})")
 print(f"Posición compartida en: {POS_FILE}")
 print(f"Captura cada {args.intervalo}s con buffer local. (Ctrl+C para salir)")
 
@@ -229,7 +328,7 @@ def guardar():
     """Genera una lectura de vuelo, la guarda en el buffer y actualiza el
     fichero de posición para el proceso de detección.
     """
-    m = datos_simulados()
+    m = datos_simulados() if args.fake else datos_mavlink()
     ts = datetime.now().astimezone().isoformat()
 
     # 1) Actualizar la posición compartida (lo más crítico para detección).

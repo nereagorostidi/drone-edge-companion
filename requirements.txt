@@ -1,7 +1,31 @@
-bme680==2.0.0
+# Dependencias de los 5 dominios (sensor, sistema, vuelo, deteccion, receptor).
+# bme680/smbus2 solo funcionan de verdad en Linux con I2C (Raspberry Pi);
+# fuera de la Pi instalan igualmente pero sensor.py debe correr con --fake.
 fastcrc==0.3.6
 lxml==6.1.1
 paho-mqtt==2.1.0
+psutil==7.2.2
 pymavlink==2.4.49
 python-dotenv==1.2.2
+bme680==2.0.0
 smbus2==0.6.1
+
+# deteccion.py: YOLO sobre vídeo/cámara.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0
+torchvision==0.28.0
+opencv-python==5.0.0.93
+ultralytics==8.4.123
+
+# deteccion.py --runtime onnx / onnx-int8: inferencia con ONNX Runtime en vez de PyTorch.
+onnxruntime==1.29.0
+
+# conversion/exportar_onnx.py: convertir weights/best.pt a weights/best.onnx (solo dev, no lo usa deteccion.py en tiempo de inferencia)
+onnx==1.22.0
+
+# conversion/cuantizar_onnx.py: convertir weights/best.onnx a weights/best.int8.onnx (solo dev)
+# usa onnxruntime.quantization, ya incluido arriba
+
+# deteccion.py --runtime ncnn: inferencia con NCNN (optimizado para CPUs ARM, p.ej. Raspberry Pi).
+# conversion/exportar_ncnn.py (generar weights/best_ncnn_model/) tambien usa este paquete.
+ncnn==1.0.20260526

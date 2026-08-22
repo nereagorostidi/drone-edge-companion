@@ -34,7 +34,7 @@ DRONE_ID = os.getenv("DRONE_ID", "dron-01")
 
 # Cadena de conexion MAVLink. Contra el simulador (SITL) es la misma que
 # se valido en mision01.py: la Pi escucha y Mission Planner le reenvia.
-MAVLINK_CONN = os.getenv("MAVLINK_CONN", "udpin:0.0.0.0:14550")
+MAVLINK_CONN = os.getenv("MAVLINK_CONN", "udpin:127.0.0.1:14550")
 
 # El receptor escucha SOLO el topic de comandos de SU dron.
 TOPIC = f"dronsar/{DRONE_ID}/comandos"
