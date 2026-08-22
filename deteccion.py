@@ -299,7 +299,7 @@ if MQTT_ON:
         """Aplica un comando de configuración recibido del panel de control.
 
         Formato del payload (lo publica api.py, ver COMANDOS_CONFIG):
-            {"command": "...", "params": {...}, "drone_id": "...",
+            {"command": "...", "params": {...}, "dron_id": "...",
              "command_id": "...", "timestamp": "..."}
 
         Comandos soportados en este topic:

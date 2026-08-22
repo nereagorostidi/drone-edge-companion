@@ -21,6 +21,7 @@ Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se susc
 - `deteccion.py` — Dominio `deteccion`: detección de personas (YOLO) sobre un vídeo o una cámara en vivo (`--camera`), con alerta MQTT georreferenciada.
 - `streaming.py` — Clase `EmisorRTSP`, usada por `deteccion.py` (`--stream`) para emitir el vídeo anotado en directo hacia un servidor MediaMTX por RTSP, vía `ffmpeg`. Es un extra a prueba de fallos: si `ffmpeg` no está instalado, la red falla o MediaMTX no responde, se desactiva sola y la detección (vídeo local + alertas) sigue igual.
 - `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto.
+- `mision01.py` — Script suelto de prueba (sin MQTT, sin dominios): se conecta directo a Mission Planner en SITL, sube una misión de 4 waypoints sobre el campo de Galapagar, arma, despega en `GUIDED` y la ejecuta en `AUTO`. Sirve para comprobar la comunicación Pi ↔ Mission Planner por MAVLink de forma aislada, sin el resto del sistema — no forma parte del nodo edge en producción (ver [Comprobación aislada de MAVLink con `mision01.py`](#comprobación-aislada-de-mavlink-con-mision01py)).
 - `weights/` — Pesos del modelo YOLO entrenado: `best.pt` (PyTorch) y, opcionalmente, `best.onnx` (ONNX), `best.int8.onnx` (ONNX cuantizado) y `best_ncnn_model/` (NCNN), usados por `deteccion.py` según `--runtime`.
 - `conversion/exportar_onnx.py` — Utilidad puntual para generar `weights/best.onnx` a partir de `weights/best.pt`; volver a ejecutarlo cada vez que haya un `best.pt` nuevo (reentrenamiento).
 - `conversion/cuantizar_onnx.py` — Utilidad puntual para generar `weights/best.int8.onnx` (cuantización dinámica a INT8) a partir de `weights/best.onnx`; más ligero y rápido en CPU, a costa de algo de precisión. Volver a ejecutarlo cada vez que se regenere `best.onnx`.
@@ -76,12 +77,12 @@ Botón (control.gorostiditfg.com) → HTTP → api.py (EC2)
    → MAVLink → autopiloto
 ```
 
-`receptor.py` se suscribe al topic `dronsar/<DRONE_ID>/comandos` y traduce cada comando recibido mediante un diccionario de acciones MAVLink. No se comunica directamente con `api.py`: ambos son clientes independientes del broker. Tampoco da órdenes a Mission Planner, sino al autopiloto; Mission Planner, conectado al mismo autopiloto, refleja lo que ocurre.
+`receptor.py` se suscribe al topic `dronsar/<DRON_ID>/comandos` y traduce cada comando recibido mediante un diccionario de acciones MAVLink. No se comunica directamente con `api.py`: ambos son clientes independientes del broker. Tampoco da órdenes a Mission Planner, sino al autopiloto; Mission Planner, conectado al mismo autopiloto, refleja lo que ocurre.
 
-> Nota: `receptor.py` usa sus propias variables de entorno (`DRONE_ID`, `MQTT_BROKER`) en vez de las del resto de dominios (`DRON_ID`, `EC2_HOST`), aunque todos comparten ya el mismo prefijo de topic `dronsar/...`. Son procesos independientes técnicamente, pero **`DRONE_ID` y `DRON_ID` deben tener el mismo valor** en el `.env`: el panel de control ahora deja elegir el dron desde un desplegable (`dron-01` / `dron-02`, validado en `api.py` contra `DRONES_VALIDOS`), y ese valor va literalmente en el topic. Si `DRONE_ID` no coincide con `DRON_ID` (p. ej. uno en `dron-02` y el otro con el valor por defecto `dron-01`), los comandos de vuelo se publican en un topic que `receptor.py` no escucha y se pierden sin ningún error visible.
+> Nota: `receptor.py` usa las mismas `DRON_ID`/`EC2_HOST` que el resto de dominios. El valor de `DRON_ID` debe coincidir con el que elige el panel de control en su desplegable (`dron-01` / `dron-02`, validado en `api.py` contra `DRONES_VALIDOS`), ya que va literalmente en el topic — si no coincide, los comandos de vuelo se publican en un topic que nadie escucha y se pierden sin ningún error visible.
 
 ## Flujo de configuración
-Además de comandos de vuelo, el panel de control puede reconfigurar en caliente tres dominios, con el mismo esquema `dronsar/...` y el mismo formato de payload (`command`/`params`/`drone_id`/`command_id`/`timestamp`) que usa `receptor.py` para comandos — lo publica `api.py` (ver `COMANDOS_CONFIG`). Cada script se suscribe a su propio topic de configuración y aplica el cambio sin reiniciar:
+Además de comandos de vuelo, el panel de control puede reconfigurar en caliente tres dominios, con el mismo esquema `dronsar/...` y el mismo formato de payload (`command`/`params`/`dron_id`/`command_id`/`timestamp`) que usa `receptor.py` para comandos — lo publica `api.py` (ver `COMANDOS_CONFIG`). Cada script se suscribe a su propio topic de configuración y aplica el cambio sin reiniciar:
 
 | Dominio | Script | Se suscribe a | `command` | `params` | Efecto |
 |---|---|---|---|---|---|
@@ -135,8 +136,8 @@ cp .env.example .env   # edita con tus credenciales
 ## Variables de entorno
 | Variable | Usado por | Descripción |
 |---|---|---|
-| `DRON_ID` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py` | Identificador del dron; forma el topic `dronsar/{dron_id}/{dominio}` |
-| `EC2_HOST` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py` | IP elástica o dominio del servidor con el broker |
+| `DRON_ID` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py`, `receptor.py` | Identificador del dron; forma tanto los topics de telemetría (`dronsar/{dron_id}/{dominio}`) como el de comandos (`dronsar/{dron_id}/comandos`). Debe coincidir con el valor elegido en el desplegable del panel de control y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
+| `EC2_HOST` | `sensor.py`, `sistema.py`, `vuelo.py`, `deteccion.py`, `receptor.py` | IP elástica o dominio del servidor con el broker |
 | `MQTT_PORT` | todos | Puerto del broker (1883) |
 | `LOTE` | todos los dominios | Filas del buffer reenviadas por ciclo (por defecto 50) |
 | `BUFFER_SENSOR` | `sensor.py` | Ruta del buffer SQLite del dominio `ambiental` (por defecto `./ambiental.db`) |
@@ -146,10 +147,7 @@ cp .env.example .env   # edita con tus credenciales
 | `POS_FILE` | `vuelo.py`, `deteccion.py` | Ruta del fichero de posición compartido (por defecto `./posicion_actual.json`) |
 | `VIDEOS_DIR` | `deteccion.py` | Carpeta donde se guardan los vídeos anotados (por defecto `results/videos`, dentro del repo). Cambiarla no requiere tocar código — útil para apuntar a almacenamiento aparte (p. ej. `/media/...`) |
 | `FOTOS_DIR` | `deteccion.py` | Carpeta donde se guardan las fotos de cada alerta (por defecto `results/fotos`, dentro del repo). Mismo caso de uso que `VIDEOS_DIR` |
-| `MQTT_TOPIC` | — | Legado del dominio único original; los dominios actuales construyen el topic a partir de `DRON_ID` |
-| `MQTT_BROKER` | `receptor.py` | IP elástica o dominio del servidor con el broker; debe ser el mismo valor que `EC2_HOST` |
-| `DRONE_ID` | `receptor.py` | Identificador del dron; forma el topic de comandos `dronsar/{drone_id}/comandos`. Debe ser el mismo valor que `DRON_ID`, y estar entre los `DRONES_VALIDOS` que acepta `api.py` (p. ej. `dron-01`, `dron-02`) |
-| `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink (`udpin:0.0.0.0:14550` contra el SITL) |
+| `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink para enviar comandos (por defecto `udpin:127.0.0.1:14550`; debe ser un puerto distinto al de `MAVLINK_CONN_VUELO`) |
 | `MAVLINK_CONN_VUELO` | `vuelo.py` | Cadena de conexión MAVLink para leer telemetría (por defecto `udpin:0.0.0.0:14552`; debe ser un puerto distinto al de `MAVLINK_CONN`). No se usa con `--fake` |
 | `STREAM_HOST` | `deteccion.py` (`--stream`) | IP o dominio del servidor MediaMTX. Obligatoria para que el streaming se active (si falta, se desactiva solo con un aviso) |
 | `STREAM_USER` / `STREAM_PASS` | `deteccion.py` (`--stream`) | Credenciales RTSP contra MediaMTX. Obligatorias igual que `STREAM_HOST` |
@@ -157,7 +155,7 @@ cp .env.example .env   # edita con tus credenciales
 | `STREAM_ANCHO` / `STREAM_ALTO` | `deteccion.py` (`--stream`) | Resolución del vídeo emitido en directo (por defecto 640×360) — menor que la del vídeo local, para no saturar el enlace |
 | `STREAM_FPS` | `deteccion.py` (`--stream`) | FPS del streaming en directo (por defecto 12) |
 
-El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente. Esto incluye `DRONE_ID`/`DRON_ID`: si no coinciden entre sí (y con el valor elegido en el desplegable del panel de control), el mensaje se publica pero ningún proceso de este Pi lo recibe.
+El topic debe coincidir de forma exacta con el del suscriptor en el EC2: un topic mal escrito no genera ningún error, los mensajes se publican y se descartan silenciosamente. Esto incluye `DRON_ID`: si no coincide con el valor elegido en el desplegable del panel de control, el mensaje se publica pero ningún proceso de este Pi lo recibe.
 
 ## Ejecución manual
 Los scripts de dominio y `receptor.py` se ejecutan en paralelo y son independientes entre sí.
@@ -242,6 +240,18 @@ python receptor.py
 ```
 
 Al arrancar, `receptor.py` debe mostrar el autopiloto conectado y la suscripción al topic. Si se queda esperando en la conexión MAVLink, revisar que Mission Planner esté reenviando por UDP a la IP actual de la Pi (SerialOutput → UDP Outbound → puerto 14550, con *Write access* activado).
+
+#### Comprobación aislada de MAVLink con `mision01.py`
+`mision01.py` es un script de prueba suelto, sin MQTT ni ningún dominio — solo para comprobar que la comunicación Pi ↔ Mission Planner por MAVLink funciona, antes de meter el resto del sistema por medio. Sube una misión fija de 4 waypoints sobre el campo de Galapagar, arma, despega en `GUIDED` a 30 m y la ejecuta en `AUTO`; al terminar el dron vuelve al punto de despegue (RTL).
+
+En Mission Planner: `Ctrl+F` (pantalla de opciones de simulación) → `MAVLink` → `SerialOutput` → `UDP` → `Outbound` → IP de la Pi, puerto `14550` (con *Write access* activado) — la misma configuración de reenvío que usa `receptor.py`.
+
+```bash
+source /home/nerea/drone-edge-companion/venv/bin/activate
+python mision01.py
+```
+
+Ojo: usa el **mismo puerto (14550)** que `receptor.py` — no los ejecutes a la vez, competirían por el mismo socket UDP.
 
 Para comprobar desde otra máquina que la telemetría de un dominio llega al broker:
 ```bash

@@ -28,16 +28,22 @@ from pymavlink import mavutil
 # =====================================================================
 load_dotenv()
 
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+EC2_HOST = os.getenv("EC2_HOST")
 MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
-DRONE_ID = os.getenv("DRONE_ID", "dron-01")
+DRON_ID = os.getenv("DRON_ID")
+
+# Validacion temprana, igual que el resto de dominios.
+faltan = [k for k, v in {"DRON_ID": DRON_ID, "EC2_HOST": EC2_HOST}.items() if not v]
+if faltan:
+    raise SystemExit(f"Faltan variables en el .env: {', '.join(faltan)}.")
 
 # Cadena de conexion MAVLink. Contra el simulador (SITL) es la misma que
 # se valido en mision01.py: la Pi escucha y Mission Planner le reenvia.
 MAVLINK_CONN = os.getenv("MAVLINK_CONN", "udpin:127.0.0.1:14550")
 
-# El receptor escucha SOLO el topic de comandos de SU dron.
-TOPIC = f"dronsar/{DRONE_ID}/comandos"
+# El receptor escucha SOLO el topic de comandos de SU dron. Misma variable
+# DRON_ID que usan sensor.py/sistema.py/vuelo.py/deteccion.py.
+TOPIC = f"dronsar/{DRON_ID}/comandos"
 
 
 # =====================================================================
@@ -113,7 +119,7 @@ client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_message = on_message
 
-client.connect(MQTT_BROKER, MQTT_PORT, 60)
+client.connect(EC2_HOST, MQTT_PORT, 60)
 
 print("Receptor en marcha. Esperando comandos... (Ctrl+C para salir)")
 try:
