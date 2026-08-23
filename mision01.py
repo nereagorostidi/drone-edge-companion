@@ -2,7 +2,7 @@
 Ejecuta la misión de búsqueda sobre el campo de Galapagar en el SITL.
 
 Se conecta al autopiloto a través del reenvío UDP de Mission Planner
-(SerialOutput -> UDP Outbound 0.0.0.0:14550), sube los 4 waypoints,
+(SerialOutput -> UDP Outbound 127.0.0.1:14550), sube los 4 waypoints,
 arma, despega en GUIDED y lanza la misión en AUTO. Al terminar, el dron
 vuelve al punto de despegue y aterriza (RTL).
 """
@@ -13,7 +13,7 @@ from pymavlink import mavutil
 # ----------------------------------------------------------------------
 # 1. Conexión (a través del reenvío UDP de Mission Planner)
 # ----------------------------------------------------------------------
-master = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
+master = mavutil.mavlink_connection('udpin:127.0.0.1:14550')
 master.wait_heartbeat()
 print(f"Conectado: sistema {master.target_system}, "
       f"componente {master.target_component}")
@@ -26,13 +26,13 @@ tgt_comp = master.target_component
 #    (latitud, longitud, altitud_relativa_en_metros)
 # ----------------------------------------------------------------------
 WAYPOINTS = [
-    (40.5976331, -3.9999729, 100),
-    (40.5970548, -3.9991575, 100),
-    (40.5969977, -4.0009117, 100),
-    (40.5976087, -4.0007669, 100),
+    (40.5976331, -3.9999729, 20),
+    (40.5970548, -3.9991575, 20),
+    (40.5969977, -4.0009117, 20),
+    (40.5976087, -4.0007669, 20),
 ]
 
-TAKEOFF_ALT = 30  # altitud de despegue en metros (relativa al home)
+TAKEOFF_ALT = 10  # altitud de despegue en metros (relativa al home)
 
 FRAME = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
 
@@ -139,11 +139,17 @@ master.mav.mission_set_current_send(tgt_sys, tgt_comp, 1)
 set_mode('AUTO')
 print("Misión en marcha. Observa el dron moverse en Mission Planner.")
 
-# Monitorizamos qué waypoint va alcanzando
+# El último item es el RTL; su seq es len(items)-1.
+# Como aquí son 4 waypoints + home + RTL = 6 items, el último seq es 5.
+ULTIMO_SEQ = 5
+
 while True:
     msg = master.recv_match(type='MISSION_ITEM_REACHED',
                             blocking=True, timeout=120)
     if msg is None:
-        print("Sin más eventos (misión terminada o timeout).")
+        print("Sin más eventos (timeout).")
         break
     print(f"Waypoint {msg.seq} alcanzado")
+    if msg.seq == ULTIMO_SEQ:
+        print("Último punto alcanzado: el dron regresa a casa (RTL). Misión completada.")
+        break
