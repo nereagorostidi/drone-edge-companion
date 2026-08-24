@@ -37,7 +37,8 @@ AVISO DE SEGURIDAD — leer antes de ejecutar:
           sudo systemctl start mavlink-router.service
 
 Uso:
-    python3 test-arm-disarm.py
+    python3 test-arm-disarm.py                        # serie directo (por defecto)
+    python3 test-arm-disarm.py --conexion router       # vía mavlink-router (UDP)
     python3 test-arm-disarm.py --device /dev/ttyAMA0 --baud 57600
     python3 test-arm-disarm.py --segundos 15
     python3 test-arm-disarm.py --sin-confirmar   # NO recomendado
@@ -56,15 +57,24 @@ from pymavlink import mavutil
 #  ARGUMENTOS DE LÍNEA DE COMANDOS
 # =====================================================================
 parser = argparse.ArgumentParser(
-    description="Prueba de armado/desarmado del Pixhawk por TELEM3 (serie directo)")
+    description="Prueba de armado/desarmado del Pixhawk, por serie directo o por mavlink-router")
+parser.add_argument("--conexion", choices=["serial", "router"], default="serial",
+                    help="'serial' (por defecto): abre el puerto serie directo (--device/--baud). "
+                         "'router': conecta contra mavlink-router por UDP (127.0.0.1:14550), "
+                         "sin tocar el puerto serie — usa esto si mavlink-router ya está corriendo.")
 parser.add_argument("--device", default="/dev/ttyAMA0",
-                    help="Dispositivo serie (por defecto: /dev/ttyAMA0)")
+                    help="Dispositivo serie, solo con --conexion serial (por defecto: /dev/ttyAMA0)")
 parser.add_argument("--baud", type=int, default=57600,
-                    help="Baudios (por defecto: 57600, debe coincidir con SERIALx_BAUD)")
+                    help="Baudios, solo con --conexion serial (por defecto: 57600, debe coincidir con SERIALx_BAUD)")
+parser.add_argument("--puerto-router", default="udpin:127.0.0.1:14550",
+                    help="Endpoint UDP de mavlink-router, solo con --conexion router "
+                         "(por defecto: udpin:127.0.0.1:14550, el mismo que usa receptor.py)")
 parser.add_argument("--sysid", type=int, default=1,
                     help="SYSID propio de este proceso (por defecto: 1, igual que el vehículo)")
-parser.add_argument("--compid", type=int, default=191,
-                    help="COMPID propio de este proceso (por defecto: 191, MAV_COMP_ID_ONBOARD_COMPUTER)")
+parser.add_argument("--compid", type=int, default=None,
+                    help="COMPID propio de este proceso. Por defecto: 191 con --conexion serial, "
+                         "193 con --conexion router (para no coincidir con receptor.py, que ya usa "
+                         "191 cuando habla contra mavlink-router al mismo tiempo).")
 parser.add_argument("--segundos", type=int, default=10,
                     help="Segundos armado antes de desarmar (por defecto: 10)")
 parser.add_argument("--sin-confirmar", action="store_true",
@@ -73,6 +83,9 @@ parser.add_argument("--forzar-directo", action="store_true",
                     help="Si el ARM normal falla, fuerza directamente sin volver a preguntar "
                          "(sigue pidiendo la confirmación 'FORZAR' de seguridad)")
 args = parser.parse_args()
+
+if args.compid is None:
+    args.compid = 193 if args.conexion == "router" else 191
 
 
 # =====================================================================
@@ -103,31 +116,56 @@ def confirmar_seguridad():
     log.info("Confirmación recibida. Continuando.")
 
 
-def conectar(device, baud, sysid, compid):
-    """Conecta por serie directo al autopiloto y espera el heartbeat."""
-    log.info("Conectando a %s a %d baudios (sysid=%d, compid=%d) ...",
-              device, baud, sysid, compid)
+def conectar(conexion, device, baud, puerto_router, sysid, compid):
+    """Conecta al autopiloto, o bien por serie directo (TELEM3), o bien
+    por UDP contra un endpoint de mavlink-router ya en marcha.
+    """
+    if conexion == "router":
+        destino = puerto_router
+        log.info("Conectando a mavlink-router en %s (sysid=%d, compid=%d) ...",
+                  destino, sysid, compid)
+    else:
+        destino = device
+        log.info("Conectando a %s a %d baudios (sysid=%d, compid=%d) ...",
+                  destino, baud, sysid, compid)
+
     try:
-        master = mavutil.mavlink_connection(
-            device,
-            baud=baud,
-            source_system=sysid,
-            source_component=compid,
-        )
+        if conexion == "router":
+            master = mavutil.mavlink_connection(
+                destino,
+                source_system=sysid,
+                source_component=compid,
+            )
+        else:
+            master = mavutil.mavlink_connection(
+                destino,
+                baud=baud,
+                source_system=sysid,
+                source_component=compid,
+            )
     except Exception as e:
-        log.error("No se ha podido abrir el puerto serie: %s", e)
-        log.error("¿No tendrás mavlink-router corriendo? Tiene el puerto abierto "
-                   "para él solo. Prueba: sudo systemctl stop mavlink-router.service")
+        log.error("No se ha podido abrir la conexión: %s", e)
+        if conexion == "serial":
+            log.error("¿No tendrás mavlink-router corriendo? Tiene el puerto serie "
+                       "abierto para él solo. Prueba: sudo systemctl stop mavlink-router.service "
+                       "— o, más simple, relanza este script con --conexion router.")
+        else:
+            log.error("¿Está mavlink-router realmente arrancado? Prueba: "
+                       "sudo systemctl status mavlink-router.service")
         sys.exit(1)
 
-    log.info("Puerto abierto. Esperando heartbeat del autopiloto (timeout 15s) ...")
+    log.info("Conexión abierta. Esperando heartbeat del autopiloto (timeout 15s) ...")
     hb = master.wait_heartbeat(timeout=15)
     if hb is None:
         log.error("No ha llegado ningún heartbeat en 15 segundos.")
-        log.error("¿No tendrás mavlink-router corriendo? Aunque el puerto se haya "
-                   "podido abrir, si otro proceso ya lo tiene tomado no llegará nada "
-                   "por aquí. Prueba: sudo systemctl stop mavlink-router.service")
-        log.error("Si mavlink-router ya está parado, revisa cableado (TX/RX/GND) y "
+        if conexion == "serial":
+            log.error("¿No tendrás mavlink-router corriendo y quedándose con el puerto "
+                       "serie? Prueba: sudo systemctl stop mavlink-router.service — o "
+                       "relanza este script con --conexion router.")
+        else:
+            log.error("¿Está mavlink-router corriendo, y con TELEM3 realmente recibiendo "
+                       "datos del Pixhawk? Revisa: journalctl -u mavlink-router.service -f")
+        log.error("Si mavlink-router ya está descartado, revisa cableado (TX/RX/GND) y "
                    "SERIALx_PROTOCOL/BAUD en ArduPilot.")
         sys.exit(1)
 
@@ -277,7 +315,8 @@ def main():
     log.info("test-arm-disarm.py — inicio %s", datetime.now().isoformat(timespec="seconds"))
     log.info("=" * 70)
 
-    master = conectar(args.device, args.baud, args.sysid, args.compid)
+    master = conectar(args.conexion, args.device, args.baud, args.puerto_router,
+                       args.sysid, args.compid)
     esperar_modo_y_estado(master)
 
     if not args.sin_confirmar:

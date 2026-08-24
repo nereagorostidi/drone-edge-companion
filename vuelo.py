@@ -15,9 +15,14 @@ la posición a cada alerta de persona.
 Sigue la MISMA plantilla que los demás colectores: captura, guarda en un
 buffer local SQLite y reenvía por MQTT con la lógica "store-and-forward".
 
-Por defecto lee la telemetría REAL por MAVLink (pymavlink), ya sea del
-Pixhawk (conexión serie) o de Mission Planner actuando como SITL (conexión
-UDP). Con el flag --fake se generan datos simulados en su lugar, centrados
+Por defecto lee la telemetría REAL por MAVLink (pymavlink). La conexión
+depende de MAVLINK_MODE en el .env:
+  - "sitl" (por defecto): Mission Planner actuando como SITL, por UDP.
+  - "real": el Pixhawk está conectado por TELEM3, y mavlink-router
+    reparte ese puerto serie (/dev/ttyAMA0 en esta Raspberry Pi — OJO,
+    NO /dev/serial0, que en esta placa apunta a un UART distinto que no
+    está cableado a TELEM3) hacia un puerto UDP local para este proceso.
+Con el flag --fake se generan datos simulados en su lugar, centrados
 en el campo de vuelo de Galapagar (LECMUAV090) — útil para probar el resto
 de la cadena (buffer, reenvío, fichero de posición) sin autopiloto a mano.
 
@@ -35,10 +40,15 @@ Variables de entorno (.env):
     BUFFER_DB         ruta del buffer SQLite (por defecto: vuelo.db)
     POS_FILE          ruta del fichero de posición compartido
     LOTE              filas enviadas por ciclo (por defecto 50)
-    MAVLINK_CONN_VUELO cadena de conexión MAVLink (por defecto:
-                       udpin:0.0.0.0:14552 — SITL/Mission Planner; para el
-                       Pixhawk real, algo como /dev/serial0 o /dev/ttyACM0).
-                       No se usa en modo --fake.
+    MAVLINK_MODE      "sitl" (por defecto) o "real"
+    MAVLINK_CONN_VUELO         cadena de conexión en modo sitl
+                                (por defecto: udpin:0.0.0.0:14552)
+    MAVLINK_CONN_REAL_VUELO    cadena de conexión en modo real, vía
+                                mavlink-router (por defecto:
+                                udpin:127.0.0.1:14551)
+    MAVLINK_SYSID              sysid propio (por defecto: 1)
+    MAVLINK_COMPID_VUELO       compid propio (por defecto: 192)
+                                No se usa nada de esto en modo --fake.
 """
 
 import os
@@ -88,14 +98,21 @@ LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
 # bloqueos que gestionar.
 POS_FILE = os.getenv("POS_FILE", "./posicion_actual.json")
 
-# Cadena de conexión MAVLink (solo se usa si NO se pasa --fake). Contra
-# Mission Planner en modo SITL es una conexión UDP entrante; el propio
-# Mission Planner reenvía por "SerialOutput -> UDP Outbound" a este puerto.
-# Debe ser un puerto DISTINTO al de receptor.py (MAVLINK_CONN), para que
-# ambos procesos puedan escuchar/hablar con el autopiloto a la vez. Con el
-# Pixhawk real conectado por cable, aquí va la ruta serie (p. ej.
-# "/dev/serial0" o "/dev/ttyACM0").
-MAVLINK_CONN_VUELO = os.getenv("MAVLINK_CONN_VUELO", "udpin:0.0.0.0:14552")
+# --- Selección de modo de conexión MAVLink ---
+# "sitl": Mission Planner / SITL (loopback, red).
+# "real": mavlink-router sobre TELEM3 (Pixhawk real).
+MAVLINK_MODE = os.getenv("MAVLINK_MODE", "sitl").strip().lower()
+
+if MAVLINK_MODE == "real":
+    MAVLINK_CONN_VUELO = os.getenv("MAVLINK_CONN_REAL_VUELO", "udpin:127.0.0.1:14551")
+else:
+    MAVLINK_CONN_VUELO = os.getenv("MAVLINK_CONN_VUELO", "udpin:0.0.0.0:14552")
+
+# --- Identificación MAVLink propia de este proceso ---
+# Mismo SYSID que el vehículo, y un COMPID propio dentro del rango
+# reservado para companion computers (MAV_COMP_ID_ONBOARD_COMPUTER2=192).
+MAVLINK_SYSID = int(os.getenv("MAVLINK_SYSID", 1))
+MAVLINK_COMPID_VUELO = int(os.getenv("MAVLINK_COMPID_VUELO", 192))
 
 # El topic y el client_id se construyen a partir del identificador del dron.
 TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
@@ -216,8 +233,14 @@ def datos_simulados():
 # aquí es SOLO para leer telemetría (no se envían comandos).
 master = None
 if not args.fake:
-    print(f"Conectando al autopiloto en {MAVLINK_CONN_VUELO} ...")
-    master = mavutil.mavlink_connection(MAVLINK_CONN_VUELO)
+    print(f"Conectando al autopiloto en {MAVLINK_CONN_VUELO} "
+          f"(modo={MAVLINK_MODE}, sysid={MAVLINK_SYSID}, "
+          f"compid={MAVLINK_COMPID_VUELO}) ...")
+    master = mavutil.mavlink_connection(
+        MAVLINK_CONN_VUELO,
+        source_system=MAVLINK_SYSID,
+        source_component=MAVLINK_COMPID_VUELO,
+    )
     master.wait_heartbeat()
     print(f"Autopiloto conectado: sistema {master.target_system}, "
           f"componente {master.target_component}")
