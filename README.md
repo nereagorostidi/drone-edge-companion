@@ -149,6 +149,7 @@ En Mission Planner: `Ctrl+F` (pantalla de opciones de simulación) → `MAVLink`
 source /home/nerea/drone-edge-companion/venv/bin/activate
 python mision01.py
 ```
+Con `vuelo-sar.service` en concreto, comprobar antes que el Pixhawk (o Mission Planner en SITL) ya está reenviando por MAVLink (ver [Requisitos](#requisitos)): el `ExecStart` no lleva `--fake`, así que sin eso disponible el servicio se queda esperando el heartbeat indefinidamente en vez de arrancar.
 
 Ojo: usa el **mismo puerto (14550)** que `receptor.py` — no los ejecutes a la vez, competirían por el mismo socket UDP.
 
