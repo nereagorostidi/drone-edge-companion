@@ -4,8 +4,9 @@ receptor.py — Receptor de comandos a bordo (Raspberry Pi)
 Hace de puente entre dos mundos:
 
   1) Al broker MQTT: se suscribe al topic de comandos de su dron y espera
-     ordenes (armar, desarmar...) publicadas desde la nube, ya sea por la
-     API REST del panel de control o por comandos.py desde terminal.
+     ordenes (arm, disarm, takeoff, hold, land, rtl) publicadas desde la
+     nube, ya sea por la API REST del panel de control o por comandos.py
+     desde terminal.
 
   2) Al autopiloto por MAVLink: ejecuta esas ordenes. La conexion depende
      de MAVLINK_MODE en el .env:
@@ -133,7 +134,9 @@ threading.Thread(target=_hilo_lector_mavlink, daemon=True).start()
 # =====================================================================
 #  ACCIONES MAVLINK  (la "traduccion" de cada comando)
 # =====================================================================
-TIMEOUT_ARM_DISARM = 10  # segundos de espera de confirmacion del autopiloto
+TIMEOUT_ARM_DISARM = 10   # segundos de espera de confirmacion del autopiloto
+TIMEOUT_MODO = 5          # segundos de espera de confirmacion de cambio de modo
+ALTITUD_DESPEGUE_DEF = 10  # metros (AGL) si el comando takeoff no trae params.altitude
 
 
 def hacer_arm():
@@ -181,11 +184,92 @@ def hacer_disarm():
                   f"desarmar. Desarma manualmente por RC o Mission Planner de inmediato.")
 
 
-# Diccionario que asocia cada 'command' del JSON con su funcion.
+def cambiar_modo(modo):
+    """Cambia el modo de vuelo del autopiloto y espera su confirmacion.
+
+    NO lee del puerto MAVLink: solo ENVIA el cambio y consulta
+    master.flightmode (estado ya cacheado por el hilo lector). Devuelve
+    True si el autopiloto confirma el modo dentro de TIMEOUT_MODO.
+    """
+    modo = modo.upper()
+    mapa = master.mode_mapping() or {}
+    if modo not in mapa:
+        log.error(f"  -> El autopiloto no reconoce el modo '{modo}'. "
+                  f"Modos disponibles: {sorted(mapa)}")
+        return False
+
+    log.info(f"Enviando cambio de modo -> {modo} ...")
+    master.set_mode(mapa[modo])
+
+    limite = time.time() + TIMEOUT_MODO
+    while time.time() < limite:
+        if (master.flightmode or "").upper() == modo:
+            log.info(f"  -> Modo {modo} confirmado por el autopiloto.")
+            return True
+        time.sleep(0.2)
+
+    log.warning(f"  -> El autopiloto NO ha confirmado el modo {modo} tras "
+                f"{TIMEOUT_MODO}s (modo actual: {master.flightmode}). "
+                f"Revisa los [STATUSTEXT autopiloto] del log para el motivo.")
+    return False
+
+
+def hacer_takeoff(params):
+    """Despegue vertical a params['altitude'] metros (AGL).
+
+    Secuencia: GUIDED -> armar (si no lo esta ya) -> MAV_CMD_NAV_TAKEOFF.
+    Es fire-and-forget: no bloquea esperando alcanzar la altitud (el
+    [latido] del log y vuelo.py reflejan la altura real).
+    """
+    try:
+        altitud = float(params.get("altitude"))
+    except (TypeError, ValueError):
+        altitud = ALTITUD_DESPEGUE_DEF
+        log.warning(f"  -> takeoff sin 'altitude' valido; se usa {altitud} m por defecto.")
+
+    if not cambiar_modo("GUIDED"):
+        log.error("  -> Despegue abortado: no se pudo entrar en GUIDED.")
+        return
+
+    if not master.motors_armed():
+        hacer_arm()
+        if not master.motors_armed():
+            log.error("  -> Despegue abortado: el autopiloto no ha armado.")
+            return
+
+    log.info(f"Enviando MAV_CMD_NAV_TAKEOFF a {altitud} m ...")
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, 0, 0, 0, altitud)
+
+
+def hacer_hold(params=None):
+    """'Mantener posicion' -> modo LOITER (requiere GPS con fix 3D)."""
+    cambiar_modo("LOITER")
+
+
+def hacer_land(params=None):
+    """Aterrizar en la vertical actual -> modo LAND."""
+    cambiar_modo("LAND")
+
+
+def hacer_rtl(params=None):
+    """Volver a casa y aterrizar -> modo RTL."""
+    cambiar_modo("RTL")
+
+
+# Diccionario que asocia cada 'command' del JSON con su funcion. Todas las
+# acciones reciben 'params' (el dict params del JSON MQTT), aunque la
+# mayoria lo ignore; solo takeoff lo usa (params['altitude']).
 # Anadir un comando nuevo en el futuro = anadir una entrada aqui.
 ACCIONES = {
-    "arm": hacer_arm,
-    "disarm": hacer_disarm,
+    "arm": lambda params: hacer_arm(),
+    "disarm": lambda params: hacer_disarm(),
+    "takeoff": hacer_takeoff,
+    "hold": hacer_hold,
+    "land": hacer_land,
+    "rtl": hacer_rtl,
 }
 
 
@@ -231,16 +315,17 @@ def on_message(client, userdata, msg):
         return
 
     command = orden.get("command")
+    params = orden.get("params") or {}
     cmd_id = orden.get("command_id", "?")
-    log.info(f"Comando recibido [{cmd_id}]: {command}")
+    log.info(f"Comando recibido [{cmd_id}]: {command} params={params}")
 
     accion = ACCIONES.get(command)
     if accion is None:
         log.warning(f"  -> Comando desconocido '{command}'; se ignora.")
         return
 
-    # Ejecuta la accion MAVLink correspondiente.
-    accion()
+    # Ejecuta la accion MAVLink correspondiente, pasandole los params del JSON.
+    accion(params)
 
 
 # =====================================================================
