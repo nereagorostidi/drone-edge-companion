@@ -1,0 +1,27 @@
+description: Ultralytics YOLO11n model trained on /home/nerea/modelos_TFG/dron-sar-model-15/data.yaml
+author: Ultralytics
+date: '2026-08-29T19:30:00+02:00'
+version: 8.4.115
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: persona
+args:
+  batch: 1
+  nms: true
+channels: 3
+# nms: la NMS va incrustada en el .hef (on-chip). Es lo que genera por
+# defecto tanto 'yolo export format=hailo' como el Hailo Model Zoo para
+# modelos de deteccion YOLOv8/YOLO11. Con nms: true Ultralytics usa el
+# decode _decode_nms (salida ya en cajas). Si al ejecutar en la Pi salen
+# 0 detecciones o un error dentro de _decode_nms, pon nms: false y vuelve
+# a probar (ver hailortcli parse-hef para confirmarlo).
+nms: true
+end2end: true

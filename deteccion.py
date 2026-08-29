@@ -79,6 +79,7 @@ Uso:
     python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere conversion/exportar_onnx.py antes)
     python3 deteccion.py vuelo1.mp4 --runtime onnx-int8  # carga weights/best.int8.onnx (cuantizado, requiere conversion/cuantizar_onnx.py antes)
     python3 deteccion.py vuelo1.mp4 --runtime ncnn   # carga weights/best_ncnn_model/ (requiere conversion/exportar_ncnn.py antes)
+    python3 deteccion.py vuelo1.mp4 --runtime hef    # carga weights/best_hailo_model/ (acelerador Hailo; solo en la Raspberry Pi con el AI Kit y HailoRT)
     python3 deteccion.py -h                           # ayuda con los valores por defecto
 
 Variables de entorno (.env) — necesarias solo con --mqtt true:
@@ -146,7 +147,7 @@ parser.add_argument('--overlay', type=_str2bool, default=True,
                      help='Añadir a la foto guardada (results/fotos/) la posicion del dron y la fecha/hora de la deteccion (true/false). No afecta al video anotado ni al preview')
 parser.add_argument('--stream', type=_str2bool, default=True,
                      help='Emitir el vídeo anotado en directo hacia MediaMTX (true/false), en paralelo a la grabación local')
-parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn'), default='pt',
+parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn', 'hef'), default='pt',
                      help="Motor de inferencia: 'pt' carga weights/best.pt via PyTorch (el de siempre); "
                           "'onnx' carga weights/best.onnx via ONNX Runtime (mas ligero/rapido, requiere "
                           "haberlo generado antes con conversion/exportar_onnx.py); 'onnx-int8' carga "
@@ -154,7 +155,10 @@ parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn'), de
                           "haberla generado antes con conversion/cuantizar_onnx.py; revisa la precision antes de "
                           "usarla en vuelo real); 'ncnn' carga la carpeta weights/best_ncnn_model/ "
                           "(motor optimizado para CPUs ARM como la de la Raspberry Pi, requiere haberla "
-                          "generado antes con conversion/exportar_ncnn.py)")
+                          "generado antes con conversion/exportar_ncnn.py); 'hef' carga la carpeta "
+                          "weights/best_hailo_model/ en el acelerador Hailo del AI Kit (el .hef se compila "
+                          "aparte y se deja ahi; SOLO funciona en la Raspberry Pi con el Hailo conectado y "
+                          "HailoRT instalado, no en un PC normal)")
 args = parser.parse_args()
 
 
@@ -232,20 +236,47 @@ if STREAM_ON and not all([STREAM_HOST, STREAM_USER, STREAM_PASS]):
 # =====================================================================
 # Cargar VUESTRO cerebro entrenado. El motor de inferencia (--runtime)
 # es independiente del modelo base: solo decide que pesos se cargan y
-# con que backend (PyTorch, ONNX Runtime o NCNN). Todos son un unico
-# fichero salvo 'ncnn', que exporta una carpeta.
+# con que backend (PyTorch, ONNX Runtime, NCNN o Hailo). Todos son un
+# unico fichero salvo 'ncnn' y 'hef', que son carpetas.
 NOMBRE_PESOS = {'pt': 'best.pt', 'onnx': 'best.onnx', 'onnx-int8': 'best.int8.onnx',
-                'ncnn': 'best_ncnn_model'}[args.runtime]
+                'ncnn': 'best_ncnn_model', 'hef': 'best_hailo_model'}[args.runtime]
 GENERAR_CON = {'pt': None, 'onnx': 'conversion/exportar_onnx.py', 'onnx-int8': 'conversion/cuantizar_onnx.py',
-               'ncnn': 'conversion/exportar_ncnn.py'}[args.runtime]
+               'ncnn': 'conversion/exportar_ncnn.py', 'hef': None}[args.runtime]
 WEIGHTS_PATH = os.path.join(BASE_DIR, 'weights', NOMBRE_PESOS)
-existe = os.path.isdir(WEIGHTS_PATH) if args.runtime == 'ncnn' else os.path.isfile(WEIGHTS_PATH)
+ES_CARPETA = args.runtime in ('ncnn', 'hef')
+
+# El .hef (formato del acelerador Hailo del AI Kit) no se genera aqui: se
+# compila aparte y se deja en weights/. Ultralytics lo carga desde una
+# CARPETA weights/best_hailo_model/ (igual que ncnn), que debe contener el
+# best.hef y, idealmente, su metadata.yaml. Si el best.hef quedo suelto en
+# weights/, lo movemos dentro de esa carpeta la primera vez (y su
+# metadata.yaml si tambien esta suelto al lado).
+if args.runtime == 'hef' and not os.path.isdir(WEIGHTS_PATH):
+    hef_suelto = os.path.join(BASE_DIR, 'weights', 'best.hef')
+    if os.path.isfile(hef_suelto):
+        os.makedirs(WEIGHTS_PATH, exist_ok=True)
+        os.replace(hef_suelto, os.path.join(WEIGHTS_PATH, 'best.hef'))
+        meta_suelto = os.path.join(BASE_DIR, 'weights', 'metadata.yaml')
+        if os.path.isfile(meta_suelto):
+            os.replace(meta_suelto, os.path.join(WEIGHTS_PATH, 'metadata.yaml'))
+        print(f'best.hef movido a "{WEIGHTS_PATH}" (carpeta que espera Ultralytics para Hailo).')
+
+existe = os.path.isdir(WEIGHTS_PATH) if ES_CARPETA else os.path.isfile(WEIGHTS_PATH)
 if not existe:
+    if args.runtime == 'hef':
+        raise SystemExit(
+            f'No encuentro "{WEIGHTS_PATH}". Crea la carpeta weights/best_hailo_model/ con el '
+            f'best.hef dentro (y su metadata.yaml si lo tienes), o usa --runtime pt. Recuerda que '
+            f'--runtime hef solo funciona en la Raspberry Pi con el Hailo conectado y HailoRT instalado.')
     raise SystemExit(
         f'No encuentro "{WEIGHTS_PATH}". '
         + (f'Genera ese fichero antes con {GENERAR_CON} o usa --runtime pt.'
            if GENERAR_CON else 'Falta weights/best.pt.'))
-model = YOLO(WEIGHTS_PATH)
+
+# Con Hailo, si la carpeta no trae metadata.yaml Ultralytics no puede
+# deducir la tarea: se la damos explicita (este proyecto siempre es
+# deteccion). Para el resto de runtimes la tarea sale de los pesos.
+model = YOLO(WEIGHTS_PATH, task='detect') if args.runtime == 'hef' else YOLO(WEIGHTS_PATH)
 
 video_path = args.video_path
 VID_STRIDE = args.vid_stride
