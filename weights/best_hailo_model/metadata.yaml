@@ -1,28 +1,16 @@
-description: YOLO11n (1 clase 'persona') compilado para Hailo-8 a partir de best.pt
-author: Ultralytics
-version: 8.4.115
-license: AGPL-3.0 License (https://ultralytics.com/license)
-docs: https://docs.ultralytics.com
-stride: 32
+# Metadatos del modelo Hailo para  deteccion.py --runtime hef
+#
+# Este best.hef NO lo exporto Ultralytics: viene del pipeline Hailo Model
+# Zoo / DFC y saca los tensores del head YOLO SIN postprocesar
+#   - 3 mapas de regresion  80x80x64 / 40x40x64 / 20x20x64   (64 = 4 lados x 16 bins DFL)
+#   - 3 mapas de clase       80x80x1  / 40x40x1  / 20x20x1    (1 clase)
+#   - strides 8 / 16 / 32 ,  entrada UINT8 NHWC 640x640x3 (normalizacion on-chip)
+# Lo decodifica runtime_hef.py (DFL -> dist2bbox -> sigmoide -> NMS).
+#
+# De aqui solo se lee 'names' (para las etiquetas del video anotado).
 task: detect
-head: Detect
-batch: 1
-imgsz:
-- 640
-- 640
 names:
   0: persona
-args:
-  batch: 1
-  nms: true
-channels: 3
-# nms: true -> el .hef lleva la NMS incrustada (on-chip). Es lo que genera
-# el Hailo Model Zoo / DFC para YOLOv8-YOLO11 de deteccion, y encaja con lo
-# visto en el .hef anterior (devolvia indices de clase directos). Ultralytics
-# usa entonces el decode _decode_nms (salida ya en cajas).
-# Si en la Pi salen 0 detecciones o un error dentro de _decode_nms, cambia a
-# nms: false. Para confirmarlo sin adivinar:
-#   hailortcli parse-hef weights/best_hailo_model/best.hef
-#   -> si hay una capa 'nms_postprocess' es true; si son salidas HxWxC es false.
-nms: true
-end2end: true
+imgsz: 640
+hw_arch: hailo8
+origen: compilado desde un best.pt de 1 clase 'persona'

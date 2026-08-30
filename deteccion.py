@@ -273,10 +273,16 @@ if not existe:
         + (f'Genera ese fichero antes con {GENERAR_CON} o usa --runtime pt.'
            if GENERAR_CON else 'Falta weights/best.pt.'))
 
-# Con Hailo, si la carpeta no trae metadata.yaml Ultralytics no puede
-# deducir la tarea: se la damos explicita (este proyecto siempre es
-# deteccion). Para el resto de runtimes la tarea sale de los pesos.
-model = YOLO(WEIGHTS_PATH, task='detect') if args.runtime == 'hef' else YOLO(WEIGHTS_PATH)
+# El .hef de este proyecto NO lo exporto Ultralytics (sale del pipeline del
+# Hailo Model Zoo / DFC) y devuelve los tensores del head YOLO sin
+# postprocesar, asi que el backend Hailo de Ultralytics no sabe leerlo. Lo
+# ejecuta un runtime propio (runtime_hef.py): HailoRT + postproceso YOLO a
+# mano, exponiendo la misma interfaz .predict()/.boxes/.plot() que YOLO.
+if args.runtime == 'hef':
+    from runtime_hef import HailoYolo
+    model = HailoYolo(WEIGHTS_PATH, imgsz=640)
+else:
+    model = YOLO(WEIGHTS_PATH)
 
 video_path = args.video_path
 VID_STRIDE = args.vid_stride
