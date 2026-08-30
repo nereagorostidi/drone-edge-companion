@@ -636,10 +636,15 @@ try:
 
         # stream=True: procesa el video frame a frame (con el salto de
         # vid_stride) sin cargarlo entero en memoria.
+        # classes=[0]: nos quedamos solo con la clase 0 ('persona'). Con los
+        # pesos propios (pt/onnx/ncnn) es un no-op porque solo hay esa clase;
+        # con 'hef' es ademas una red de seguridad: si el .hef trajera mas
+        # clases, evita que r.plot() reviente con un indice fuera de 'names'.
         results = model.predict(
             source=fuente,
             imgsz=640,       # igual que el imgsz de entrenamiento; a menos resolucion se pierde detalle y confunde mas las clases
             conf=args.conf,        # confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)
+            classes=[0],     # solo 'persona' (indice 0); ver comentario de arriba
             vid_stride=VID_STRIDE,    # 1 = analiza todos los frames; subirlo va mas rapido pero puede saltarse personas que pasan rapido
             stream=True,
             verbose=False,
