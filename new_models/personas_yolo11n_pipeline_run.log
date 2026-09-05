@@ -1,0 +1,66 @@
+2026-08-30 19:16:23,418 [INFO] ============================================================
+2026-08-30 19:16:23,418 [INFO]   INICIANDO PIPELINE DE CONVERSION Y COMPILACION COMPLETA
+2026-08-30 19:16:23,418 [INFO] ============================================================
+2026-08-30 19:16:23,418 [INFO]   Fecha/hora:                 2026-08-30T19:16:23
+2026-08-30 19:16:23,418 [INFO]   Python:                     3.11.15
+2026-08-30 19:16:23,418 [INFO]   Etiqueta del modelo (--tag): personas
+2026-08-30 19:16:23,418 [INFO]   Nombre base de salida:      personas_yolo11n
+2026-08-30 19:16:23,418 [INFO]   Modo:                       a partir de pesos existentes
+2026-08-30 19:16:23,418 [INFO]   Pesos de partida:           /home/andres/hailo_workspace/person/old_weights/best.pt
+2026-08-30 19:16:23,418 [INFO]   Carpeta origen (dataset):   /home/andres/hailo_workspace/person
+2026-08-30 19:16:23,418 [INFO]   data.yaml:                  /home/andres/hailo_workspace/person/data.yaml
+2026-08-30 19:16:23,418 [INFO]   Imagenes de calibracion:    /home/andres/hailo_workspace/person/valid/images
+2026-08-30 19:16:23,418 [INFO]   Tamano de imagen:           640x640
+2026-08-30 19:16:23,418 [INFO]   Arquitectura Hailo:         hailo8
+2026-08-30 19:16:23,418 [INFO]   Directorio salida:          /home/andres/hailo_workspace/new_models
+2026-08-30 19:16:23,418 [INFO]   Directorio logs:            /home/andres/hailo_workspace/logs
+2026-08-30 19:16:23,418 [INFO]   Archivo log de esta sesion: /home/andres/hailo_workspace/logs/personas_pipeline_20260830_191623.log
+2026-08-30 19:16:23,418 [INFO] ============================================================
+2026-08-30 19:16:23,418 [INFO] 
+--- [Paso 1/6] Comprobaciones previas ---
+2026-08-30 19:16:23,418 [INFO]   OK  Carpeta origen encontrada: /home/andres/hailo_workspace/person
+2026-08-30 19:16:23,418 [INFO]   OK  data.yaml encontrado: /home/andres/hailo_workspace/person/data.yaml
+2026-08-30 19:16:23,419 [INFO]   OK  88 imagenes disponibles para calibracion en /home/andres/hailo_workspace/person/valid/images (se usaran hasta 100)
+2026-08-30 19:16:23,419 [INFO]   OK  Pesos de partida encontrados: /home/andres/hailo_workspace/person/old_weights/best.pt (5.25 MB)
+2026-08-30 19:16:23,419 [INFO]   Todas las comprobaciones previas OK, continuando...
+2026-08-30 19:16:38,529 [INFO] 
+--- [Paso 2/6] Preparando modelo PyTorch (.pt) ---
+2026-08-30 19:16:38,529 [INFO] Copiando modelo original (solo lectura) desde: /home/andres/hailo_workspace/person/old_weights/best.pt
+2026-08-30 19:16:38,531 [INFO]   Copiado a: /home/andres/hailo_workspace/new_models/personas_yolo11n_best.pt
+2026-08-30 19:16:38,588 [INFO] ✓ PyTorch aislado en: /home/andres/hailo_workspace/new_models/personas_yolo11n_best.pt (5.25 MB)
+2026-08-30 19:16:38,588 [INFO]   Clases configuradas (1): {0: 'persona'}
+2026-08-30 19:16:38,588 [INFO] 
+--- [Paso 3/6] Exportando a ONNX FP32 (opset=11) ---
+2026-08-30 19:16:38,588 [INFO]   Llamando a model.export(format='onnx', ...), puede tardar un momento...
+2026-08-30 19:16:40,497 [INFO] ✓ ONNX FP32 listo: /home/andres/hailo_workspace/new_models/personas_yolo11n.onnx (10.11 MB) en 1.91s
+2026-08-30 19:16:40,497 [INFO] 
+--- [Paso 4/6] Cuantizando grafo a ONNX INT8 ---
+2026-08-30 19:16:41,149 [INFO] ✓ ONNX INT8 listo: /home/andres/hailo_workspace/new_models/personas_yolo11n_int8.onnx (2.87 MB) en 0.65s
+2026-08-30 19:16:41,149 [INFO] 
+--- [Paso 5/6] Exportando a formato Edge NCNN ---
+2026-08-30 19:16:44,483 [INFO] ✓ NCNN listo: /home/andres/hailo_workspace/new_models/personas_yolo11n_ncnn (10.04 MB) en 3.33s
+2026-08-30 19:16:44,483 [INFO] 
+--- [Paso 6/6] Compilando a HEF para Hailo-8 (26 TOPS) ---
+2026-08-30 19:16:44,483 [INFO] Procesando 88 imagenes para el set de calibracion...
+2026-08-30 19:16:44,537 [INFO]   ...20/88 imagenes de calibracion procesadas
+2026-08-30 19:16:44,564 [INFO]   ...40/88 imagenes de calibracion procesadas
+2026-08-30 19:16:44,592 [INFO]   ...60/88 imagenes de calibracion procesadas
+2026-08-30 19:16:44,621 [INFO]   ...80/88 imagenes de calibracion procesadas
+2026-08-30 19:16:44,635 [INFO]   ...88/88 imagenes de calibracion procesadas
+2026-08-30 19:16:44,667 [INFO] ✓ Dataset calibracion guardado: /home/andres/hailo_workspace/new_models/personas_yolo11n_calib.npy (forma: (88, 640, 640, 3)) en 0.18s
+2026-08-30 19:16:44,667 [INFO] Inicializando ClientRunner(hw_arch='hailo8')...
+2026-08-30 19:16:44,682 [INFO] -> [DFC 1/4] Traduciendo grafo ONNX con 6 ramas convolucionales...
+2026-08-30 19:16:47,516 [INFO] ✓ Traduccion completada en 2.83s
+2026-08-30 19:16:47,517 [INFO] -> [DFC 2/4] Aplicando script ALLS de optimizacion y mapeo...
+2026-08-30 19:16:47,517 [INFO]   ALLS:
+normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])
+model_optimization_flavor(optimization_level=2)
+
+2026-08-30 19:16:47,562 [INFO] -> [DFC 3/4] Cuantizando pesos y activaciones a INT8 (puede tardar varios minutos)...
+2026-08-30 19:24:56,827 [INFO] ✓ Cuantizacion INT8 completada en 489.27s
+2026-08-30 19:24:56,828 [INFO] -> [DFC 4/4] Mapeando clusters y compilando binario HEF (puede tardar varios minutos)...
+2026-08-30 19:36:42,921 [INFO] ✓ Binario HEF listo: /home/andres/hailo_workspace/new_models/personas_yolo11n.hef (6.90 MB) en 706.09s
+2026-08-30 19:36:42,921 [INFO] 
+--- Generando fichero de etiquetas y metadatos ---
+2026-08-30 19:36:42,921 [INFO] ✓ Etiquetas (1): /home/andres/hailo_workspace/new_models/personas_yolo11n_labels.txt
+2026-08-30 19:36:42,921 [INFO] ✓ Metadatos: /home/andres/hailo_workspace/new_models/personas_yolo11n_metadata.json
