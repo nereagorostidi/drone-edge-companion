@@ -5,3 +5,5 @@ venv/
 results/
 __pycache__/
 *.pyc
+
+samples/*.mp4

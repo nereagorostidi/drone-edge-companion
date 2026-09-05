@@ -1,6 +1,6 @@
-description: Ultralytics YOLO11n model trained on data.yaml
+description: Ultralytics YOLO11n model trained on /home/nerea/modelos_TFG/dron-sar-model-15/data.yaml
 author: Ultralytics
-date: '2026-08-20T19:36:39.747578+02:00'
+date: '2026-08-29T18:00:09.767933+02:00'
 version: 8.4.115
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com

@@ -1,0 +1,16 @@
+# Metadatos del modelo Hailo para  deteccion.py --runtime hef
+#
+# Este best.hef NO lo exporto Ultralytics: viene del pipeline Hailo Model
+# Zoo / DFC y saca los tensores del head YOLO SIN postprocesar
+#   - 3 mapas de regresion  80x80x64 / 40x40x64 / 20x20x64   (64 = 4 lados x 16 bins DFL)
+#   - 3 mapas de clase       80x80x1  / 40x40x1  / 20x20x1    (1 clase)
+#   - strides 8 / 16 / 32 ,  entrada UINT8 NHWC 640x640x3 (normalizacion on-chip)
+# Lo decodifica runtime_hef.py (DFL -> dist2bbox -> sigmoide -> NMS).
+#
+# De aqui solo se lee 'names' (para las etiquetas del video anotado).
+task: detect
+names:
+  0: persona
+imgsz: 640
+hw_arch: hailo8
+origen: compilado desde un best.pt de 1 clase 'persona'

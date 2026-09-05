@@ -38,7 +38,18 @@ Botón (control.gorostiditfg.com) → HTTP → api.py (EC2)
    → MAVLink → autopiloto
 ```
 
-`receptor.py` se suscribe al topic `dronsar/<DRON_ID>/comandos` y traduce cada comando recibido mediante un diccionario de acciones MAVLink. No se comunica directamente con `api.py`: ambos son clientes independientes del broker. Tampoco da órdenes a Mission Planner, sino al autopiloto; Mission Planner, conectado al mismo autopiloto, refleja lo que ocurre.
+`receptor.py` se suscribe al topic `dronsar/<DRON_ID>/comandos` y traduce cada comando recibido mediante un diccionario de acciones MAVLink (`ACCIONES`). No se comunica directamente con `api.py`: ambos son clientes independientes del broker. Tampoco da órdenes a Mission Planner, sino al autopiloto; Mission Planner, conectado al mismo autopiloto, refleja lo que ocurre.
+
+| `command` | `params` | Traducción a MAVLink |
+|---|---|---|
+| `arm` | `{}` | `arducopter_arm()` + espera confirmación de armado |
+| `disarm` | `{}` | `arducopter_disarm()` + espera confirmación |
+| `takeoff` | `{"altitude": N}` | modo `GUIDED` → arma si hace falta → `MAV_CMD_NAV_TAKEOFF` a `N` m (AGL); si no llega `altitude`, usa `ALTITUD_DESPEGUE_DEF` = 10 m |
+| `hold` | `{}` | modo `LOITER` (mantener posición; requiere GPS con fix 3D) |
+| `land` | `{}` | modo `LAND` (aterriza en la vertical actual) |
+| `rtl` | `{}` | modo `RTL` (vuelve al punto de despegue y aterriza) |
+
+Los cambios de modo se confirman leyendo `master.flightmode` (que mantiene al día el hilo lector de MAVLink), no releyendo del puerto. Si el autopiloto rechaza un armado o un cambio de modo, el motivo aparece en el log como `[STATUSTEXT autopiloto]` (p. ej. `PreArm: GPS: no fix`).
 
 > Nota: `receptor.py` usa las mismas `DRON_ID`/`EC2_HOST` que el resto de dominios. El valor de `DRON_ID` debe coincidir con el que elige el panel de control en su desplegable (`dron-01` / `dron-02`, validado en `api.py` contra `DRONES_VALIDOS`), ya que va literalmente en el topic — si no coincide, los comandos de vuelo se publican en un topic que nadie escucha y se pierden sin ningún error visible.
 
