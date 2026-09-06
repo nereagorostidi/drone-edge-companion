@@ -416,6 +416,43 @@ def abortar_mision_en_curso(motivo):
         log.info("  -> Mision detenida.")
 
 
+TIMEOUT_ESPERA_DESARME = 120  # s maximos esperando que aterrice y desarme solo
+MODO_TRAS_MISION = "STABILIZE"  # modo "neutro", siempre armable, sin depender del GPS
+
+
+def _dejar_en_modo_seguro_tras_mision():
+    """Al terminar la mision SOLA (nadie ha pulsado hold/land/rtl), ArduCopter
+    se queda en AUTO o GUIDED para siempre: el autopiloto NUNCA vuelve solo
+    a otro modo, y por diseno no deja armar en AUTO salvo que la mision
+    empiece con un despegue (no es el caso). Sin esto, tras cada mision
+    habria que ir a Mission Planner a cambiar de modo a mano antes de poder
+    volver a armar desde la web.
+
+    Solo actua si la mision de verdad tomo el mando (modo GUIDED/AUTO); si
+    nunca llego a tocar el modo (p. ej. fallo al subir la mision), no hace
+    nada. Y solo cambia de modo una vez CONFIRMADO el desarme (estado
+    cacheado por el hilo lector, sin leer el puerto aqui): cambiar de modo
+    con los motores aun armados podria cortar el RTL/aterrizaje a medias.
+    """
+    if (master.flightmode or "").upper() not in ("GUIDED", "AUTO"):
+        return  # la mision no llego a tomar el mando; no se toca nada
+
+    limite = time.time() + TIMEOUT_ESPERA_DESARME
+    while time.time() < limite and master.motors_armed():
+        time.sleep(0.5)
+
+    if master.motors_armed():
+        log.warning(f"  -> El dron sigue armado {TIMEOUT_ESPERA_DESARME}s "
+                    f"despues de terminar la mision (modo {master.flightmode}). "
+                    f"No se fuerza un cambio de modo por seguridad: usa "
+                    f"hold/land/rtl desde la web si hace falta.")
+        return
+
+    log.info(f"  -> Dron desarmado tras la mision (modo {master.flightmode}); "
+            f"pasando a {MODO_TRAS_MISION} para poder volver a armar.")
+    cambiar_modo(MODO_TRAS_MISION)
+
+
 def _ejecutar_mision(modulo):
     """Cuerpo del hilo de mision: prepara el contexto y la ejecuta.
 
@@ -448,6 +485,12 @@ def _ejecutar_mision(modulo):
     else:
         log.warning(f"[{modulo.NOMBRE}] Mision terminada SIN completar el "
                     f"recorrido (revisa el log de arriba).")
+
+    # Si ha sido un hold/land/rtl desde la web quien ha parado la mision,
+    # esa misma orden ya deja el modo que el operador quiere (LOITER/LAND/
+    # RTL): no hay que tocar nada mas aqui.
+    if not _mision_abortar.is_set():
+        _dejar_en_modo_seguro_tras_mision()
 
 
 def hacer_start_mission(params):
