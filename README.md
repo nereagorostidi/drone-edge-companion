@@ -12,7 +12,7 @@ Cada dominio es un script independiente que sigue la misma plantilla store-and-f
 | `vuelo` | `vuelo.py` | `dronsar/{dron_id}/vuelo` | Telemetría de vuelo (posición, actitud, batería, GPS, modo). Además escribe `posicion_actual.json` con la última posición conocida |
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion` | Detección de personas con YOLO sobre un vídeo o cámara en vivo (`--camera`); adjunta a cada alerta la posición del dron leída de `posicion_actual.json` y el nombre de la foto guardada de esa detección |
 
-Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se suscribe al topic de comandos y los traduce a MAVLink (ver [Flujo de comandos](docs/flujos.md#flujo-de-comandos)).
+Aparte de los dominios anteriores, `receptor.py` no publica telemetría: se suscribe al topic de comandos y los traduce a MAVLink, incluida la ejecución de misiones completas (`start_mission`, ver `mision01.py`) — ver [Flujo de comandos](docs/flujos.md#flujo-de-comandos).
 
 ## Documentación adicional
 Este README cubre lo esencial para arrancar y operar el nodo edge. Para temas más específicos:
@@ -28,8 +28,8 @@ Este README cubre lo esencial para arrancar y operar el nodo edge. Para temas m�
 - `vuelo.py` — Dominio `vuelo`: telemetría de vuelo (de momento con datos simulados, a la espera del Pixhawk) y escritura de `posicion_actual.json`.
 - `deteccion.py` — Dominio `deteccion`: detección de personas (YOLO) sobre un vídeo o una cámara en vivo (`--camera`), con alerta MQTT georreferenciada.
 - `streaming.py` — Clase `EmisorRTSP`, usada por `deteccion.py` (`--stream`) para emitir el vídeo anotado en directo hacia un servidor MediaMTX por RTSP, vía `ffmpeg`. Es un extra a prueba de fallos: si `ffmpeg` no está instalado, la red falla o MediaMTX no responde, se desactiva sola y la detección (vídeo local + alertas) sigue igual.
-- `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto.
-- `mision01.py` — Script suelto de prueba (sin MQTT, sin dominios): se conecta directo a Mission Planner en SITL, sube una misión de 4 waypoints sobre el campo de Galapagar, arma, despega en `GUIDED` y la ejecuta en `AUTO`. Sirve para comprobar la comunicación Pi ↔ Mission Planner por MAVLink de forma aislada, sin el resto del sistema — no forma parte del nodo edge en producción (ver [Comprobación aislada de MAVLink con `mision01.py`](#comprobación-aislada-de-mavlink-con-mision01py)).
+- `receptor.py` — Suscriptor MQTT de comandos: traduce cada orden recibida a MAVLink y la envía al autopiloto; incluye `start_mission`, que ejecuta una misión completa (registrada en su diccionario `MISIONES`) en un hilo propio, sin lanzar un proceso ni un puerto aparte.
+- `mision01.py` — Misión de búsqueda por defecto: 5 waypoints a 10 m sobre el campo de Galapagar, con `RTL` final. Es un **módulo**, no un proceso independiente: `receptor.py` lo importa y lo ejecuta en un hilo propio al recibir `start_mission` (botón «Iniciar misión» del panel de control), reutilizando su misma conexión MAVLink. También se puede lanzar suelto (`python mision01.py`) para probar contra Mission Planner en SITL sin el resto del sistema — ver [Misiones (`mision01.py`)](#misiones-mision01py).
 - `test-serial.py` — Script suelto de prueba: loopback UART en la propia Raspberry Pi (TX puenteado con RX en los pines 8 y 10), sin ningún cable a la Pixhawk. Aísla si el problema está en la Pi o en el cableado/Pixhawk (ver [Scripts de prueba de la conexión serie](docs/mavlink.md#scripts-de-prueba-de-la-conexión-serie)).
 - `test-mavlink.py` — Script suelto de prueba: heartbeat MAVLink real contra la Pixhawk por TELEM3, sin MQTT ni dominios.
 - `test-arm-serial.py` — Script suelto de prueba: ciclo completo de armado/desarmado con confirmación de seguridad, captura de motivos de rechazo (STATUSTEXT) y opción de forzar el armado; funciona por serie directo o vía `mavlink-router`.
@@ -97,6 +97,8 @@ cp .env.example .env   # edita con tus credenciales
 | `MAVLINK_SYSID` | `receptor.py`, `vuelo.py` | SYSID propio de ambos procesos (por defecto `1`, el mismo que el vehículo) |
 | `MAVLINK_COMPID_RECEPTOR` | `receptor.py` | COMPID propio de `receptor.py` (por defecto `191`, `MAV_COMP_ID_ONBOARD_COMPUTER`) — distinto del de `vuelo.py` para que ambos sean identificables por separado en los logs del autopiloto |
 | `MAVLINK_COMPID_VUELO` | `vuelo.py` | COMPID propio de `vuelo.py` (por defecto `192`, `MAV_COMP_ID_ONBOARD_COMPUTER2`) |
+| `PREFLIGHT_MISION` | `receptor.py` | `1` (por defecto): exige fix GPS 3D y ≥6 satélites antes de arrancar una misión (`start_mission`). `0` lo desactiva — solo para pruebas de banco sin GPS |
+| `MAVLINK_CONN_MISION` | `mision01.py` (modo suelto) | Cadena de conexión MAVLink al ejecutar `python mision01.py` directamente, sin `receptor.py` (por defecto `udpin:127.0.0.1:14550`). No se usa cuando la misión la lanza `receptor.py` vía `start_mission` (reutiliza su propia conexión) — y no se puede ejecutar a la vez que `receptor.py` si comparten puerto |
 | `STREAM_HOST` | `deteccion.py` (`--stream`) | IP o dominio del servidor MediaMTX. Obligatoria para que el streaming se active (si falta, se desactiva solo con un aviso) |
 | `STREAM_USER` / `STREAM_PASS` | `deteccion.py` (`--stream`) | Credenciales RTSP contra MediaMTX. Obligatorias igual que `STREAM_HOST` |
 | `STREAM_PATH` | `deteccion.py` (`--stream`) | Nombre del stream en MediaMTX (por defecto `dron_live`); forma la URL `rtsp://.../{STREAM_PATH}` |
@@ -140,8 +142,12 @@ python receptor.py
 
 Al arrancar, `receptor.py` debe mostrar el autopiloto conectado y la suscripción al topic. Si se queda esperando en la conexión MAVLink, revisar que Mission Planner esté reenviando por UDP a la IP actual de la Pi (SerialOutput → UDP Outbound → puerto 14550, con *Write access* activado) en modo `sitl`, o que `mavlink-router.service` esté activo en modo `real`.
 
-#### Comprobación aislada de MAVLink con `mision01.py`
-`mision01.py` es un script de prueba suelto, sin MQTT ni ningún dominio — solo para comprobar que la comunicación Pi ↔ Mission Planner por MAVLink funciona, antes de meter el resto del sistema por medio. Sube una misión fija de 4 waypoints sobre el campo de Galapagar, arma, despega en `GUIDED` a 30 m y la ejecuta en `AUTO`; al terminar el dron vuelve al punto de despegue (RTL).
+#### Misiones (`mision01.py`)
+`mision01.py` es la misión de búsqueda por defecto: sube 5 waypoints a 10 m sobre el campo de Galapagar, arma, despega en `GUIDED` y la ejecuta en `AUTO`, terminando con un `RTL` de vuelta al punto de despegue. Se ejecuta de dos formas:
+
+**En producción, no se lanza a mano.** El panel de control manda el comando `start_mission` (`params.mission = "mision01"`) por MQTT, y `receptor.py` la ejecuta en un hilo propio reutilizando su misma conexión MAVLink — sin abrir un proceso ni un puerto nuevo. Antes de arrancar comprueba GPS/EKF, y un `hold`/`land`/`rtl`/`disarm` posterior desde el panel la aborta antes de mandar su propio comando. Ver [Flujo de comandos](docs/flujos.md#flujo-de-comandos) para el detalle completo.
+
+**Suelta**, para probar la comunicación Pi ↔ Mission Planner por MAVLink de forma aislada, sin el resto del sistema:
 
 En Mission Planner: `Ctrl+F` (pantalla de opciones de simulación) → `MAVLink` → `SerialOutput` → `UDP` → `Outbound` → IP de la Pi, puerto `14550` (con *Write access* activado) — la misma configuración de reenvío que usa `receptor.py`.
 
@@ -149,9 +155,8 @@ En Mission Planner: `Ctrl+F` (pantalla de opciones de simulación) → `MAVLink`
 source /home/nerea/drone-edge-companion/venv/bin/activate
 python mision01.py
 ```
-Con `vuelo-sar.service` en concreto, comprobar antes que el Pixhawk (o Mission Planner en SITL) ya está reenviando por MAVLink (ver [Requisitos](#requisitos)): el `ExecStart` no lleva `--fake`, así que sin eso disponible el servicio se queda esperando el heartbeat indefinidamente en vez de arrancar.
 
-Ojo: usa el **mismo puerto (14550)** que `receptor.py` — no los ejecutes a la vez, competirían por el mismo socket UDP.
+Ojo: por defecto usa el **mismo puerto (14550)** que `receptor.py` (variable `MAVLINK_CONN_MISION`, ver [Variables de entorno](#variables-de-entorno)) — no los ejecutes a la vez, competirían por el mismo socket UDP.
 
 Para comprobar desde otra máquina que la telemetría de un dominio llega al broker:
 ```bash

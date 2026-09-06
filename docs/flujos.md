@@ -48,10 +48,20 @@ Botón (control.gorostiditfg.com) → HTTP → api.py (EC2)
 | `hold` | `{}` | modo `LOITER` (mantener posición; requiere GPS con fix 3D) |
 | `land` | `{}` | modo `LAND` (aterriza en la vertical actual) |
 | `rtl` | `{}` | modo `RTL` (vuelve al punto de despegue y aterriza) |
+| `start_mission` | `{"mission": "mision01"}` | Busca `mission` en el diccionario `MISIONES` de `receptor.py` (nunca ejecuta el string recibido); si existe, lanza esa misión en un hilo propio: sube waypoints → `GUIDED` → arma → despega → `AUTO`, hasta el `RTL` final |
 
 Los cambios de modo se confirman leyendo `master.flightmode` (que mantiene al día el hilo lector de MAVLink), no releyendo del puerto. Si el autopiloto rechaza un armado o un cambio de modo, el motivo aparece en el log como `[STATUSTEXT autopiloto]` (p. ej. `PreArm: GPS: no fix`).
 
 > Nota: `receptor.py` usa las mismas `DRON_ID`/`EC2_HOST` que el resto de dominios. El valor de `DRON_ID` debe coincidir con el que elige el panel de control en su desplegable (`dron-01` / `dron-02`, validado en `api.py` contra `DRONES_VALIDOS`), ya que va literalmente en el topic — si no coincide, los comandos de vuelo se publican en un topic que nadie escucha y se pierden sin ningún error visible.
+
+### Misiones (`start_mission`)
+A diferencia del resto de comandos (un cambio de modo puntual), `start_mission` ejecuta un plan de vuelo completo. `receptor.py` lo hace en un **hilo propio dentro del mismo proceso**, no en un proceso ni un puerto MAVLink aparte: la misión (`mision01.py`, o cualquier otra que se añada) recibe un `ContextoMision` con la conexión, el cambio de modo y el armado ya existentes de `receptor.py`, y solo puede leer del autopiloto a través de una `SuscripcionMavlink` — el hilo lector de MAVLink sigue siendo el único que llama a `recv_match()`, y reparte copias de los tipos de mensaje que la misión necesita (`MISSION_REQUEST`, `MISSION_ACK`, `MISSION_ITEM_REACHED`...).
+
+Antes de arrancar, comprueba GPS/EKF (fix 3D, ≥6 satélites — desactivable con `PREFLIGHT_MISION=0`, solo para pruebas de banco) y que no haya ya otra misión en curso.
+
+Un `hold` / `land` / `rtl` / `disarm` posterior aborta la misión en curso (vía un `threading.Event`, comprobado en cada paso que mueve el dron) **antes** de mandar su propio comando, para que la misión no le pise el modo de vuelo un instante después. Y como ArduCopter nunca vuelve solo a otro modo al terminar una misión en `AUTO`, `receptor.py` lo devuelve a `STABILIZE` en dos momentos: al terminar la misión por sí sola (solo una vez confirmado el desarme — nunca a mitad de un `RTL`/aterrizaje) y al arrancar el propio proceso, por si el autopiloto ya estaba en `AUTO`/`GUIDED` de una sesión anterior (p. ej. tras reiniciar `receptor.py` sin reiniciar el SITL/Pixhawk).
+
+Añadir una misión nueva: crear `misionNN.py` con la misma interfaz que `mision01.py` (`NOMBRE`, `DESCRIPCION`, `TIPOS_MAVLINK`, `ejecutar(ctx)`) y añadirla al diccionario `MISIONES` de `receptor.py`.
 
 ## Flujo de configuración
 Además de comandos de vuelo, el panel de control puede reconfigurar en caliente tres dominios, con el mismo esquema `dronsar/...` y el mismo formato de payload (`command`/`params`/`dron_id`/`command_id`/`timestamp`) que usa `receptor.py` para comandos — lo publica `api.py` (ver `COMANDOS_CONFIG`). Cada script se suscribe a su propio topic de configuración y aplica el cambio sin reiniciar:

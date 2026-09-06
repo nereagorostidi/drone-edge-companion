@@ -653,6 +653,39 @@ def on_message(client, userdata, msg):
 # =====================================================================
 #  CLIENTE MQTT — conexion RESILIENTE (no bloqueante, con reintento solo)
 # =====================================================================
+def _normalizar_modo_al_arrancar():
+    """Deja el autopiloto listo para armar si arranca ya en AUTO/GUIDED.
+
+    Pasa cuando este proceso se reinicia (o el ordenador) pero el SITL o
+    la Pixhawk siguen encendidos de una sesion anterior: el autopiloto se
+    queda en AUTO/GUIDED para siempre (nunca vuelve solo a otro modo), y
+    sin desarmar/rearmar por medio la web parece "atascada" sin arm. Aqui
+    solo se lee master.flightmode/motors_armed(), que ya estan pobladas
+    tras el wait_heartbeat() de mas arriba; no hace falta esperar nada.
+
+    Si esta ARMADO, no se toca nada: podria estar volando de verdad
+    (p. ej. una mision en marcha lanzada por Mission Planner o por otro
+    receptor), y forzar un cambio de modo en ese caso seria peligroso.
+    """
+    modo = (master.flightmode or "").upper()
+    if modo not in ("GUIDED", "AUTO"):
+        return
+
+    if master.motors_armed():
+        log.warning(f"  -> El autopiloto arranca en modo {modo} y ARMADO. "
+                    f"No se toca el modo de vuelo por seguridad; si no esta "
+                    f"volando de verdad, aterriza/desarma manualmente.")
+        return
+
+    log.info(f"  -> El autopiloto arranca en modo {modo} sin armar (se ha "
+            f"quedado asi de antes); pasando a {MODO_TRAS_MISION} para "
+            f"dejarlo listo para armar desde la web.")
+    cambiar_modo(MODO_TRAS_MISION)
+
+
+_normalizar_modo_al_arrancar()
+
+
 client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_connect_fail = on_connect_fail
