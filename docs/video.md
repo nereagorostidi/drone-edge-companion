@@ -4,6 +4,8 @@ Todo lo relativo al dominio `deteccion`: opciones de línea de comandos de `dete
 
 Requiere `weights/best.pt` (pesos del modelo YOLO entrenado).
 
+**Procedencia de `weights/`.** El entrenamiento de `best.pt` (YOLO11n sobre el dataset de personas) se hace en Google Colab, aprovechando su GPU gratuita. A partir de ahí, la conversión de ese `best.pt` al resto de formatos que necesita `deteccion.py` — ONNX, ONNX INT8, NCNN y el `.hef` para el Hailo-8 — se hace aparte, con `generate_all_formats.py` (ver más abajo), en un PC Linux prestado con GPU: es simplemente más ágil y cómodo que hacerlo desde el propio Colab, sobre todo por la compilación a `.hef`, que necesita el Dataflow Compiler de Hailo instalado localmente (no disponible en Colab) y tarda varios minutos.
+
 ## Ejecución sobre un vídeo de fichero
 ```bash
 source /home/nerea/drone-edge-companion/venv/bin/activate
@@ -28,18 +30,38 @@ python deteccion.py samples/vuelo1.mp4 --stream false   # sin streaming en direc
 ```
 
 ## Motores de ejecución (`--runtime`) y generación de pesos
-Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Con `--runtime onnx` carga en su lugar `weights/best.onnx` (más ligero y rápido de cargar), que hay que generar antes con `conversion/exportar_onnx.py`; con `--runtime onnx-int8` carga `weights/best.int8.onnx`, la versión cuantizada a INT8 (aún más ligera y rápida en CPU, a costa de algo de precisión), que hay que generar antes con `conversion/cuantizar_onnx.py`; con `--runtime ncnn` carga la carpeta `weights/best_ncnn_model/`, un motor optimizado para CPUs ARM (Raspberry Pi incluida, a veces más rápido que ONNX Runtime en ese hardware), que hay que generar antes con `conversion/exportar_ncnn.py`:
+Por defecto (`--runtime pt`) carga `weights/best.pt` con PyTorch. Los otros cuatro motores cargan un formato derivado de ese mismo `best.pt` — `weights/best.onnx` (`--runtime onnx`), `weights/best.int8.onnx` (`--runtime onnx-int8`), `weights/best_ncnn_model/` (`--runtime ncnn`, motor optimizado para CPUs ARM como la de la Raspberry Pi) y `weights/best_hailo_model/best.hef` (`--runtime hef`, el acelerador Hailo-8 del AI Kit) — y los cuatro se generan **en un solo paso** con `generate_all_formats.py`:
 ```bash
-python conversion/exportar_onnx.py                          # genera weights/best.onnx a partir de weights/best.pt
+python3.11 -m venv compiler_env && source compiler_env/bin/activate    # solo la primera vez
+pip install vendor/hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl
+pip install -r requirements-compile.txt
+
+python generate_all_formats.py                # genera los 4 formatos a partir de weights/best.pt
 python deteccion.py samples/vuelo1.mp4 --runtime onnx
-
-python conversion/cuantizar_onnx.py                          # genera weights/best.int8.onnx a partir de weights/best.onnx
 python deteccion.py samples/vuelo1.mp4 --runtime onnx-int8
-
-python conversion/exportar_ncnn.py                           # genera weights/best_ncnn_model/ a partir de weights/best.pt
 python deteccion.py samples/vuelo1.mp4 --runtime ncnn
+python deteccion.py samples/vuelo1.mp4 --runtime hef
 ```
-Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a ejecutar el script de export correspondiente (`conversion/exportar_onnx.py`, `conversion/cuantizar_onnx.py` y/o `conversion/exportar_ncnn.py`) para regenerar los ficheros; el motor de ejecución (`--runtime`) es independiente del modelo base. Antes de usar `--runtime onnx-int8` en vuelo real, conviene comparar sus detecciones con las de `--runtime onnx` sobre el mismo vídeo, porque la cuantización dinámica no calibra con datos reales y puede perder algo de precisión.
+Cada vez que haya un `weights/best.pt` nuevo (reentrenamiento), hay que volver a ejecutar `generate_all_formats.py` para regenerar los cuatro; el motor de ejecución (`--runtime`) es independiente del modelo base. Antes de usar `--runtime onnx-int8` en vuelo real, conviene comparar sus detecciones con las de `--runtime onnx` sobre el mismo vídeo, porque la cuantización dinámica no calibra con datos reales y puede perder algo de precisión.
+
+**Importante — esto NO se ejecuta en la Raspberry Pi.** El paso que compila `best_hailo_model/best.hef` necesita el Dataflow Compiler de Hailo, que solo existe para x86_64 (nunca corre en la Pi, que es ARM). `generate_all_formats.py` se ejecuta en un PC de escritorio con su propio entorno virtual `compiler_env/` (independiente del `venv/` de producción, ver [Requisitos](../README.md#requisitos)); el resultado (`weights/`) se lleva a la Pi por el medio habitual (`git pull`, o copiando la carpeta a mano). El wheel del DFC no se distribuye por pip — hay que descargarlo de la Developer Zone de Hailo y colocarlo en `vendor/` (ver comentarios en `requirements-compile.txt`).
+
+**Alternativa sin el PC de compilación (todo salvo el `.hef`).** `weights/best.onnx`, `weights/best.int8.onnx` y `weights/best_ncnn_model/` no necesitan el Dataflow Compiler de Hailo, así que también se pueden generar desde el propio Google Colab donde se entrena `best.pt`, sin depender de ningún PC prestado. Para eso están los scripts sueltos de `conversion/` (independientes entre sí y del pipeline unificado de arriba):
+```bash
+python conversion/exportar_onnx.py       # weights/best.pt -> weights/best.onnx
+python conversion/cuantizar_onnx.py      # weights/best.onnx -> weights/best.int8.onnx
+python conversion/exportar_ncnn.py       # weights/best.pt -> weights/best_ncnn_model/
+```
+El `.hef` es la única excepción: siempre hace falta la máquina local con el DFC instalado (ver arriba), Colab no sirve para ese paso.
+
+Opciones útiles de `generate_all_formats.py` (`-h` para el resto):
+- `--weights otro/best.pt` — compila a partir de otros pesos en vez de `weights/best.pt` (se copian ahí, pasando a ser los pesos canónicos).
+- `--skip-hef` — se salta la compilación a `.hef` (el paso lento, 10-20 min); útil para iterar rápido sobre onnx/int8/ncnn.
+- `--fresh --epochs 150` — entrena un YOLO11n nuevo desde cero sobre `dataset/` en vez de partir de un `.pt` existente.
+
+Antes de sobreescribir `weights/`, el script guarda una copia de la versión anterior en `weights_prev/` (se sobreescribe en cada ejecución, no es un historial).
+
+`dataset/` (el dataset de personas usado para calibrar la cuantización INT8 del `.hef`, y para `--fresh`) no está en git — es el dataset versionado en Roboflow que indica `dataset/data.yaml`, y hay que copiarlo ahí a mano antes de compilar.
 
 ## Cámara en vivo
 En la Raspberry Pi, en vez de un vídeo grabado se puede analizar en directo desde la cámara con `--camera` (mutuamente excluyente con `video_path`):

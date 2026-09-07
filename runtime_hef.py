@@ -86,13 +86,25 @@ class _Result:
     def plot(self):
         """Frame BGR con las cajas dibujadas (equivalente basico a Results.plot())."""
         img = self.orig_img.copy()
+        color = (0, 0, 255)
+        font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
         for (cx, cy, w, h), c in zip(self.boxes.xywh.numpy(), self.boxes.conf.numpy()):
             x1, y1 = int(cx - w / 2), int(cy - h / 2)
             x2, y2 = int(cx + w / 2), int(cy + h / 2)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
+
             etq = f"{self._names.get(0, 'obj')} {c:.2f}"
-            cv2.putText(img, etq, (x1, max(12, y1 - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+            (tw, th), baseline = cv2.getTextSize(etq, font, font_scale, thickness)
+            pad = 4
+            # Fondo solido detras del texto, igual que el r.plot() de
+            # Ultralytics: sin el, el texto quedaba en el mismo rojo que el
+            # borde de la caja y, comprimido en el video final, se volvia
+            # ilegible (se confundia con el propio borde).
+            label_y2 = y1 if y1 - th - baseline - pad >= 0 else y1 + th + baseline + pad
+            label_y1 = label_y2 - th - baseline - pad
+            cv2.rectangle(img, (x1, label_y1), (x1 + tw + pad, label_y2), color, -1)
+            cv2.putText(img, etq, (x1 + pad // 2, label_y2 - baseline // 2),
+                        font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
         return img
 
 
@@ -308,7 +320,12 @@ class HailoYolo:
         if len(cajas) == 0:
             return _Result(frame_bgr, *vacio, self.names)
 
-        keep = _nms(cajas, scores, iou_thr=0.45)
+        # 0.7 = el mismo IoU por defecto que usa Ultralytics (model.predict())
+        # para los runtimes pt/onnx/ncnn; si aqui se usara un valor distinto,
+        # el NMS suprimiria cajas solapadas de forma mas (o menos) agresiva
+        # que en el resto de runtimes, y la comparacion entre ellos dejaria
+        # de ser una comparacion justa del mismo modelo.
+        keep = _nms(cajas, scores, iou_thr=0.7)
         cajas, scores = cajas[keep], scores[keep]
 
         # Deshacer el letterbox -> pixeles del frame original

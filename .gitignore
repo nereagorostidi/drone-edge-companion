@@ -7,3 +7,22 @@ __pycache__/
 *.pyc
 
 samples/*.mp4
+
+# generate_all_formats.py: dataset de entrenamiento/calibracion (regenerable
+# desde Roboflow, ver dataset/data.yaml), entorno de compilacion del DFC de
+# Hailo (pesado, x86_64 only) y su wheel, artefactos intermedios y backup
+# automatico de weights/ antes de sobreescribirlo.
+dataset/
+compiler_env/
+vendor/
+build/
+weights_prev/
+
+# Logs que el propio Dataflow Compiler de Hailo escribe en el directorio
+# desde el que se ejecuta (no en build/, no se puede elegir la ruta).
+acceleras.log
+allocator.log
+hailo_sdk.client.log
+hailo_sdk.core*.log
+.install_logs/
+hailort.log

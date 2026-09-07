@@ -4,9 +4,9 @@ receptor.py — Receptor de comandos a bordo (Raspberry Pi)
 Hace de puente entre dos mundos:
 
   1) Al broker MQTT: se suscribe al topic de comandos de su dron y espera
-     ordenes (arm, disarm, takeoff, hold, land, rtl) publicadas desde la
-     nube, ya sea por la API REST del panel de control o por comandos.py
-     desde terminal.
+     ordenes (arm, disarm, takeoff, hold, land, rtl, start_mission)
+     publicadas desde la nube, ya sea por la API REST del panel de control
+     o por comandos.py desde terminal.
 
   2) Al autopiloto por MAVLink: ejecuta esas ordenes. La conexion depende
      de MAVLINK_MODE en el .env:
@@ -15,6 +15,14 @@ Hace de puente entre dos mundos:
        - "real": el Pixhawk esta conectado por TELEM3, y mavlink-router
          reparte ese puerto serie hacia MAVLINK_CONN_REAL_RECEPTOR
          (udpin:127.0.0.1:14550 por defecto).
+
+El comando start_mission (boton "Iniciar mision" de la web) lleva en
+params.mission el NOMBRE de una mision. Ese nombre se busca en el
+diccionario MISIONES de aqui abajo, que lo traduce a un modulo Python ya
+importado; nunca se ejecuta el texto que llega por MQTT. La mision se
+ejecuta en un hilo de este mismo proceso, reutilizando esta conexion
+MAVLink (no se lanza otro proceso ni se abre otro puerto), y cualquier
+land/rtl/hold posterior la aborta antes de mandar su propio comando.
 
 La conexion MQTT es RESILIENTE: si el broker no resuelve por DNS o no
 responde (p. ej. una caida temporal de Tailscale), el script NO se cae.
@@ -30,11 +38,14 @@ Uso:
 import os
 import time
 import json
+import queue
 import logging
 import threading
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 from pymavlink import mavutil
+
+import mision01
 
 
 # =====================================================================
@@ -116,6 +127,75 @@ log.info(f"Autopiloto conectado: sistema {master.target_system}, "
 # programa (comandos MQTT, el latido periodico) solo LEE el estado ya
 # cacheado (master.flightmode / master.motors_armed()), nunca vuelve a
 # leer del puerto — asi se evita que dos hilos lean MAVLink a la vez.
+#
+# Una mision en curso SI necesita mensajes concretos (MISSION_REQUEST,
+# MISSION_ACK, MISSION_ITEM_REACHED...), que no se pueden sacar del cache
+# porque importa recibirlos en orden y en su momento. Para eso esta
+# SuscripcionMavlink: el hilo lector sigue siendo el unico que lee del
+# puerto, y va dejando COPIAS de los tipos pedidos en una cola que lee el
+# hilo de la mision.
+_suscripciones = []
+_lock_suscripciones = threading.Lock()
+
+# Tope de la cola de cada suscripcion. GLOBAL_POSITION_INT llega varias
+# veces por segundo: si por lo que sea nadie la vacia, se tiran los
+# mensajes nuevos en vez de comerse la memoria de la Pi.
+MAX_COLA_SUSCRIPCION = 2000
+
+
+class SuscripcionMavlink:
+    """Cola de mensajes MAVLink de ciertos tipos, alimentada por el hilo lector.
+
+    Se usa como context manager para que la suscripcion se de de baja
+    siempre, aunque la mision falle a mitad:
+
+        with SuscripcionMavlink(("MISSION_ACK",)) as sub:
+            msg = sub.esperar(("MISSION_ACK",), timeout=5)
+    """
+
+    def __init__(self, tipos):
+        self.tipos = set(tipos)
+        self.cola = queue.Queue(maxsize=MAX_COLA_SUSCRIPCION)
+
+    def __enter__(self):
+        with _lock_suscripciones:
+            _suscripciones.append(self)
+        return self
+
+    def __exit__(self, *excepcion):
+        with _lock_suscripciones:
+            if self in _suscripciones:
+                _suscripciones.remove(self)
+        return False
+
+    def _entregar(self, msg):
+        """Llamado SOLO por el hilo lector."""
+        if msg.get_type() not in self.tipos:
+            return
+        try:
+            self.cola.put_nowait(msg)
+        except queue.Full:
+            pass
+
+    def esperar(self, tipos, timeout):
+        """Devuelve el primer mensaje de alguno de 'tipos', o None si se
+        agota el tiempo. Los mensajes de otros tipos que haya por delante
+        en la cola se descartan por el camino (asi el chorro de
+        GLOBAL_POSITION_INT no la atasca)."""
+        tipos = set(tipos)
+        limite = time.time() + timeout
+        while True:
+            restante = limite - time.time()
+            if restante < 0:
+                return None
+            try:
+                msg = self.cola.get(timeout=max(restante, 0.01))
+            except queue.Empty:
+                return None
+            if msg.get_type() in tipos:
+                return msg
+
+
 def _hilo_lector_mavlink():
     while True:
         try:
@@ -124,8 +204,15 @@ def _hilo_lector_mavlink():
             log.error(f"Error leyendo MAVLink: {e}")
             time.sleep(1)
             continue
-        if msg is not None and msg.get_type() == "STATUSTEXT":
+        if msg is None:
+            continue
+        if msg.get_type() == "STATUSTEXT":
             log.info(f"[STATUSTEXT autopiloto] {msg.text.strip()}")
+        # Reparto a quien este ejecutando una mision (normalmente, nadie).
+        if _suscripciones:
+            with _lock_suscripciones:
+                for sub in _suscripciones:
+                    sub._entregar(msg)
 
 
 threading.Thread(target=_hilo_lector_mavlink, daemon=True).start()
@@ -144,7 +231,8 @@ def hacer_arm():
 
     Solo ENVIA el comando y consulta master.motors_armed() (estado ya
     cacheado por el hilo lector); no vuelve a leer el puerto MAVLink
-    directamente.
+    directamente. Devuelve True si el autopiloto confirma el armado (lo
+    usa la mision para no seguir adelante si no ha armado).
     """
     log.info("Enviando comando ARM al autopiloto ...")
     t0 = time.time()
@@ -156,10 +244,12 @@ def hacer_arm():
 
     if master.motors_armed():
         log.info(f"  -> Dron ARMADO (confirmado por el autopiloto en {time.time()-t0:.2f}s)")
-    else:
-        log.warning(f"  -> El autopiloto NO ha confirmado el armado tras {TIMEOUT_ARM_DISARM}s. "
-                    f"Revisa los [STATUSTEXT autopiloto] del log para el motivo "
-                    f"(GPS, calibraciones, failsafe...).")
+        return True
+
+    log.warning(f"  -> El autopiloto NO ha confirmado el armado tras {TIMEOUT_ARM_DISARM}s. "
+                f"Revisa los [STATUSTEXT autopiloto] del log para el motivo "
+                f"(GPS, calibraciones, failsafe...).")
+    return False
 
 
 def hacer_disarm():
@@ -169,6 +259,10 @@ def hacer_disarm():
     cacheado por el hilo lector); no vuelve a leer el puerto MAVLink
     directamente.
     """
+    # Desarmar con una mision en marcha seria dejar al hilo mandando
+    # ordenes a un dron parado: se corta primero.
+    abortar_mision_en_curso("disarm desde la web")
+
     log.info("Enviando comando DISARM al autopiloto ...")
     t0 = time.time()
     master.arducopter_disarm()
@@ -214,6 +308,222 @@ def cambiar_modo(modo):
     return False
 
 
+# =====================================================================
+#  MISIONES  (comando start_mission)
+# =====================================================================
+# La web publica {"command": "start_mission", "params": {"mission": "mision01"}}.
+# Ese nombre NO se ejecuta nunca como texto: solo sirve de clave en este
+# diccionario, que lo traduce a un modulo Python ya importado arriba. Si
+# el nombre no esta aqui, el comando se ignora (la API ya lo valida con su
+# lista blanca, pero se vuelve a comprobar a bordo).
+#
+# Anadir una mision nueva = crear misionNN.py con la misma interfaz que
+# mision01 (NOMBRE, TIPOS_MAVLINK, ejecutar(ctx)) y anadirla aqui.
+MISIONES = {
+    mision01.NOMBRE: mision01,
+}
+
+# La mision corre en un hilo de ESTE proceso y reutiliza la conexion
+# MAVLink de arriba. No se lanza un proceso aparte a proposito: el puerto
+# de esta conexion ya esta ocupado, dos procesos hablando con la Pixhawk
+# necesitarian mavlink-router, y abortar seria matar un proceso a mitad de
+# vuelo. Asi, abortar es solo activar un Event.
+_mision_en_curso = None                # threading.Thread de la mision activa
+_mision_abortar = threading.Event()    # se activa para pedirle que pare
+_lock_mision = threading.Lock()        # evita lanzar dos a la vez
+
+TIMEOUT_ABORTO_MISION = 5   # s de cortesia para que el hilo de mision salga
+
+# --- Preflight: condiciones minimas para arrancar una mision ---
+# Una mision arma y despega sola, asi que no se lanza a ciegas. Se puede
+# desactivar con PREFLIGHT_MISION=0 en el .env para pruebas de banco.
+PREFLIGHT_MISION = os.getenv("PREFLIGHT_MISION", "1").strip().lower() not in ("0", "false", "no")
+MIN_FIX_TYPE = 3      # 3 = fix 3D
+MIN_SATELITES = 6
+
+# Banderas del bitmask de EKF_STATUS_REPORT. Se escriben como numeros para
+# no depender de que el dialecto MAVLink cargado las exponga por nombre.
+EKF_ATTITUDE = 1
+EKF_VELOCITY_HORIZ = 2
+EKF_POS_HORIZ_ABS = 16
+EKF_UNINITIALIZED = 1024
+
+
+def _preflight_ok():
+    """Comprueba GPS y EKF antes de arrancar una mision.
+
+    Lee del cache de mensajes que mantiene el hilo lector (master.messages),
+    no del puerto. Devuelve True si se puede volar.
+    """
+    if not PREFLIGHT_MISION:
+        log.warning("  -> PREFLIGHT_MISION=0: se arranca la mision SIN "
+                    "comprobar GPS/EKF. Solo para pruebas en banco.")
+        return True
+
+    gps = master.messages.get("GPS_RAW_INT")
+    if gps is None:
+        log.error("  -> Mision no arrancada: todavia no ha llegado ningun "
+                  "GPS_RAW_INT del autopiloto.")
+        return False
+
+    if gps.fix_type < MIN_FIX_TYPE:
+        log.error(f"  -> Mision no arrancada: sin fix 3D "
+                  f"(fix_type={gps.fix_type}, se necesita >= {MIN_FIX_TYPE}).")
+        return False
+
+    sats = gps.satellites_visible if gps.satellites_visible != 255 else 0
+    if sats < MIN_SATELITES:
+        log.error(f"  -> Mision no arrancada: solo {sats} satelites "
+                  f"(se necesitan >= {MIN_SATELITES}).")
+        return False
+
+    ekf = master.messages.get("EKF_STATUS_REPORT")
+    if ekf is not None:
+        necesarias = EKF_ATTITUDE | EKF_VELOCITY_HORIZ | EKF_POS_HORIZ_ABS
+        if ekf.flags & EKF_UNINITIALIZED:
+            log.error("  -> Mision no arrancada: el EKF aun se esta inicializando.")
+            return False
+        if (ekf.flags & necesarias) != necesarias:
+            log.error(f"  -> Mision no arrancada: el EKF no tiene todavia "
+                      f"actitud + velocidad + posicion absoluta "
+                      f"(flags={ekf.flags}).")
+            return False
+
+    log.info(f"  -> Preflight OK (fix_type={gps.fix_type}, satelites={sats}).")
+    return True
+
+
+def abortar_mision_en_curso(motivo):
+    """Pide a la mision activa (si la hay) que pare, y la espera un poco.
+
+    Se llama ANTES de mandar hold/land/rtl/land: asi el hilo de la mision
+    ya no vuelve a tocar el modo de vuelo y no le pisa el comando que
+    viene de la web. Si el hilo tarda mas de la cuenta en salir da igual,
+    porque en cuanto ve el Event deja de enviar ordenes.
+    """
+    hilo = _mision_en_curso
+    if hilo is None or not hilo.is_alive():
+        return
+
+    log.warning(f"Abortando la mision en curso ({motivo}) ...")
+    _mision_abortar.set()
+    hilo.join(timeout=TIMEOUT_ABORTO_MISION)
+    if hilo.is_alive():
+        log.warning(f"  -> El hilo de la mision sigue cerrandose tras "
+                    f"{TIMEOUT_ABORTO_MISION}s; ya no enviara ordenes, se "
+                    f"continua con el comando.")
+    else:
+        log.info("  -> Mision detenida.")
+
+
+TIMEOUT_ESPERA_DESARME = 120  # s maximos esperando que aterrice y desarme solo
+MODO_TRAS_MISION = "STABILIZE"  # modo "neutro", siempre armable, sin depender del GPS
+
+
+def _dejar_en_modo_seguro_tras_mision():
+    """Al terminar la mision SOLA (nadie ha pulsado hold/land/rtl), ArduCopter
+    se queda en AUTO o GUIDED para siempre: el autopiloto NUNCA vuelve solo
+    a otro modo, y por diseno no deja armar en AUTO salvo que la mision
+    empiece con un despegue (no es el caso). Sin esto, tras cada mision
+    habria que ir a Mission Planner a cambiar de modo a mano antes de poder
+    volver a armar desde la web.
+
+    Solo actua si la mision de verdad tomo el mando (modo GUIDED/AUTO); si
+    nunca llego a tocar el modo (p. ej. fallo al subir la mision), no hace
+    nada. Y solo cambia de modo una vez CONFIRMADO el desarme (estado
+    cacheado por el hilo lector, sin leer el puerto aqui): cambiar de modo
+    con los motores aun armados podria cortar el RTL/aterrizaje a medias.
+    """
+    if (master.flightmode or "").upper() not in ("GUIDED", "AUTO"):
+        return  # la mision no llego a tomar el mando; no se toca nada
+
+    limite = time.time() + TIMEOUT_ESPERA_DESARME
+    while time.time() < limite and master.motors_armed():
+        time.sleep(0.5)
+
+    if master.motors_armed():
+        log.warning(f"  -> El dron sigue armado {TIMEOUT_ESPERA_DESARME}s "
+                    f"despues de terminar la mision (modo {master.flightmode}). "
+                    f"No se fuerza un cambio de modo por seguridad: usa "
+                    f"hold/land/rtl desde la web si hace falta.")
+        return
+
+    log.info(f"  -> Dron desarmado tras la mision (modo {master.flightmode}); "
+            f"pasando a {MODO_TRAS_MISION} para poder volver a armar.")
+    cambiar_modo(MODO_TRAS_MISION)
+
+
+def _ejecutar_mision(modulo):
+    """Cuerpo del hilo de mision: prepara el contexto y la ejecuta.
+
+    La suscripcion se abre AQUI, antes de la primera orden, para no
+    perderse el primer MISSION_REQUEST del autopiloto, y se cierra sola al
+    salir del with (aunque la mision falle a mitad).
+    """
+    def log_mision(texto):
+        log.info(f"[{modulo.NOMBRE}] {texto}")
+
+    try:
+        with SuscripcionMavlink(modulo.TIPOS_MAVLINK) as sub:
+            ctx = mision01.ContextoMision(
+                master=master,
+                esperar=sub.esperar,
+                cambiar_modo=cambiar_modo,
+                armar=hacer_arm,
+                log=log_mision,
+                abortado=_mision_abortar,
+            )
+            completada = modulo.ejecutar(ctx)
+    except Exception as e:
+        log.exception(f"[{modulo.NOMBRE}] La mision ha fallado con una "
+                      f"excepcion: {e}. El dron sigue en el modo en el que "
+                      f"estuviera; usa hold/land/rtl desde la web.")
+        return
+
+    if completada:
+        log.info(f"[{modulo.NOMBRE}] Mision terminada correctamente.")
+    else:
+        log.warning(f"[{modulo.NOMBRE}] Mision terminada SIN completar el "
+                    f"recorrido (revisa el log de arriba).")
+
+    # Si ha sido un hold/land/rtl desde la web quien ha parado la mision,
+    # esa misma orden ya deja el modo que el operador quiere (LOITER/LAND/
+    # RTL): no hay que tocar nada mas aqui.
+    if not _mision_abortar.is_set():
+        _dejar_en_modo_seguro_tras_mision()
+
+
+def hacer_start_mission(params):
+    """Arranca la mision que venga en params['mission'], si es conocida."""
+    global _mision_en_curso
+
+    nombre = params.get("mission")
+    modulo = MISIONES.get(nombre) if isinstance(nombre, str) else None
+    if modulo is None:
+        log.warning(f"  -> Mision desconocida '{nombre}'; se ignora. "
+                    f"Disponibles: {sorted(MISIONES)}")
+        return
+
+    with _lock_mision:
+        if _mision_en_curso is not None and _mision_en_curso.is_alive():
+            log.warning(f"  -> Ya hay una mision en curso; se ignora "
+                        f"'{nombre}'. Aborta con hold/land/rtl antes de "
+                        f"lanzar otra.")
+            return
+
+        log.info(f"Preparando mision '{nombre}': {modulo.DESCRIPCION}")
+        if not _preflight_ok():
+            return
+
+        _mision_abortar.clear()
+        _mision_en_curso = threading.Thread(
+            target=_ejecutar_mision, args=(modulo,),
+            name=f"mision-{nombre}", daemon=True)
+        _mision_en_curso.start()
+
+    log.info(f"  -> Mision '{nombre}' lanzada.")
+
+
 def hacer_takeoff(params):
     """Despegue vertical a params['altitude'] metros (AGL).
 
@@ -221,6 +531,10 @@ def hacer_takeoff(params):
     Es fire-and-forget: no bloquea esperando alcanzar la altitud (el
     [latido] del log y vuelo.py reflejan la altura real).
     """
+    # Un despegue manual toma el control en GUIDED: si habia una mision
+    # volando, se para primero para que no se peleen por el modo.
+    abortar_mision_en_curso("llega un takeoff manual")
+
     try:
         altitud = float(params.get("altitude"))
     except (TypeError, ValueError):
@@ -244,24 +558,31 @@ def hacer_takeoff(params):
         0, 0, 0, 0, 0, 0, altitud)
 
 
+# hold / land / rtl son ademas la forma de ABORTAR una mision desde la
+# web: primero se para el hilo de la mision y despues se manda el cambio
+# de modo, para que la mision no lo pise un segundo despues.
 def hacer_hold(params=None):
     """'Mantener posicion' -> modo LOITER (requiere GPS con fix 3D)."""
+    abortar_mision_en_curso("hold desde la web")
     cambiar_modo("LOITER")
 
 
 def hacer_land(params=None):
     """Aterrizar en la vertical actual -> modo LAND."""
+    abortar_mision_en_curso("land desde la web")
     cambiar_modo("LAND")
 
 
 def hacer_rtl(params=None):
     """Volver a casa y aterrizar -> modo RTL."""
+    abortar_mision_en_curso("rtl desde la web")
     cambiar_modo("RTL")
 
 
 # Diccionario que asocia cada 'command' del JSON con su funcion. Todas las
 # acciones reciben 'params' (el dict params del JSON MQTT), aunque la
-# mayoria lo ignore; solo takeoff lo usa (params['altitude']).
+# mayoria lo ignore; lo usan takeoff (params['altitude']) y start_mission
+# (params['mission']).
 # Anadir un comando nuevo en el futuro = anadir una entrada aqui.
 ACCIONES = {
     "arm": lambda params: hacer_arm(),
@@ -270,6 +591,7 @@ ACCIONES = {
     "hold": hacer_hold,
     "land": hacer_land,
     "rtl": hacer_rtl,
+    "start_mission": hacer_start_mission,
 }
 
 
@@ -331,6 +653,39 @@ def on_message(client, userdata, msg):
 # =====================================================================
 #  CLIENTE MQTT — conexion RESILIENTE (no bloqueante, con reintento solo)
 # =====================================================================
+def _normalizar_modo_al_arrancar():
+    """Deja el autopiloto listo para armar si arranca ya en AUTO/GUIDED.
+
+    Pasa cuando este proceso se reinicia (o el ordenador) pero el SITL o
+    la Pixhawk siguen encendidos de una sesion anterior: el autopiloto se
+    queda en AUTO/GUIDED para siempre (nunca vuelve solo a otro modo), y
+    sin desarmar/rearmar por medio la web parece "atascada" sin arm. Aqui
+    solo se lee master.flightmode/motors_armed(), que ya estan pobladas
+    tras el wait_heartbeat() de mas arriba; no hace falta esperar nada.
+
+    Si esta ARMADO, no se toca nada: podria estar volando de verdad
+    (p. ej. una mision en marcha lanzada por Mission Planner o por otro
+    receptor), y forzar un cambio de modo en ese caso seria peligroso.
+    """
+    modo = (master.flightmode or "").upper()
+    if modo not in ("GUIDED", "AUTO"):
+        return
+
+    if master.motors_armed():
+        log.warning(f"  -> El autopiloto arranca en modo {modo} y ARMADO. "
+                    f"No se toca el modo de vuelo por seguridad; si no esta "
+                    f"volando de verdad, aterriza/desarma manualmente.")
+        return
+
+    log.info(f"  -> El autopiloto arranca en modo {modo} sin armar (se ha "
+            f"quedado asi de antes); pasando a {MODO_TRAS_MISION} para "
+            f"dejarlo listo para armar desde la web.")
+    cambiar_modo(MODO_TRAS_MISION)
+
+
+_normalizar_modo_al_arrancar()
+
+
 client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_connect_fail = on_connect_fail
@@ -364,8 +719,11 @@ try:
             modo = master.flightmode or "DESCONOCIDO"
             armado = master.motors_armed()
             mqtt_ok = client.is_connected()
+            en_mision = (_mision_en_curso is not None
+                         and _mision_en_curso.is_alive())
             log.info(f"[latido] vivo — MAVLink: modo={modo} armado={armado} | "
-                     f"MQTT: {'conectado' if mqtt_ok else 'SIN conexion'}")
+                     f"MQTT: {'conectado' if mqtt_ok else 'SIN conexion'} | "
+                     f"mision: {'en curso' if en_mision else 'ninguna'}")
             ultimo_latido = ahora
 
         time.sleep(1)

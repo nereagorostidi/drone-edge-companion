@@ -1,0 +1,30 @@
+# Dependencias de generate_all_formats.py (compilar weights/ desde dataset/).
+#
+# Esto NO va en requirements.txt: son herramientas de desarrollo/compilacion,
+# pesadas y solo x86_64 (el Dataflow Compiler de Hailo no corre en ARM, o sea
+# nunca en la Raspberry Pi), independientes de lo que necesita deteccion.py
+# en tiempo de inferencia.
+#
+# Instalacion (una sola vez, ~10 GB, tarda varios minutos):
+#   python3.11 -m venv compiler_env
+#   source compiler_env/bin/activate
+#   pip install vendor/hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl
+#   pip install -r requirements-compile.txt
+#
+# El wheel del DFC no esta en este fichero porque no se resuelve por nombre
+# desde PyPI: hay que descargarlo aparte (cuenta de desarrollador en
+# hailo.ai/developer-zone/) y colocarlo en vendor/ (excluido de git, ver
+# .gitignore) antes de instalarlo a mano como arriba.
+#
+# El resto de versiones estan fijadas exactamente a las que se sabe que
+# conviven sin conflictos con las dependencias que trae el propio wheel del
+# DFC (numpy 1.26.4, onnx 1.16.0, onnxruntime 1.18.0, protobuf 3.20.3,
+# tensorflow 2.18.0): instalar ultralytics/torch sueltos, sin fijar, puede
+# arrastrar versiones mas nuevas de numpy/onnx/protobuf que rompen el DFC.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.132
+opencv-python==4.10.0.84
+PyYAML==6.0.3
+ncnn==1.0.20260526
