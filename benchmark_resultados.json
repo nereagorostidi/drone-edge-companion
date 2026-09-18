@@ -1,0 +1,112 @@
+[
+  {
+    "runtime": "pt",
+    "frames_procesados": 944,
+    "frames_descartados_warmup": 1,
+    "tiempo_total_s": 254.8,
+    "fps_medio": 3.72,
+    "latencia_media_ms": 268.59,
+    "latencia_p95_ms": 309.33,
+    "cpu_media_pct": 205.3,
+    "cpu_pico_pct": 234.6,
+    "ram_media_mb": 507.3,
+    "ram_pico_mb": 526.5,
+    "detecciones_totales": 852,
+    "frames_con_deteccion": 813,
+    "confianza_media": 0.59,
+    "params": {
+      "imgsz": 640,
+      "conf": 0.5,
+      "vid_stride": 1,
+      "augment": false
+    }
+  },
+  {
+    "runtime": "onnx",
+    "frames_procesados": 944,
+    "frames_descartados_warmup": 1,
+    "tiempo_total_s": 238.44,
+    "fps_medio": 3.98,
+    "latencia_media_ms": 251.22,
+    "latencia_p95_ms": 288.94,
+    "cpu_media_pct": 394.1,
+    "cpu_pico_pct": 414.0,
+    "ram_media_mb": 564.2,
+    "ram_pico_mb": 570.6,
+    "detecciones_totales": 861,
+    "frames_con_deteccion": 817,
+    "confianza_media": 0.59,
+    "params": {
+      "imgsz": 640,
+      "conf": 0.5,
+      "vid_stride": 1,
+      "augment": false
+    }
+  },
+  {
+    "runtime": "onnx-int8",
+    "frames_procesados": 944,
+    "frames_descartados_warmup": 1,
+    "tiempo_total_s": 237.73,
+    "fps_medio": 4.0,
+    "latencia_media_ms": 249.93,
+    "latencia_p95_ms": 278.92,
+    "cpu_media_pct": 393.2,
+    "cpu_pico_pct": 414.0,
+    "ram_media_mb": 562.1,
+    "ram_pico_mb": 572.2,
+    "detecciones_totales": 848,
+    "frames_con_deteccion": 799,
+    "confianza_media": 0.59,
+    "params": {
+      "imgsz": 640,
+      "conf": 0.5,
+      "vid_stride": 1,
+      "augment": false
+    }
+  },
+  {
+    "runtime": "ncnn",
+    "frames_procesados": 944,
+    "frames_descartados_warmup": 1,
+    "tiempo_total_s": 114.89,
+    "fps_medio": 8.35,
+    "latencia_media_ms": 119.77,
+    "latencia_p95_ms": 140.41,
+    "cpu_media_pct": 348.2,
+    "cpu_pico_pct": 376.8,
+    "ram_media_mb": 513.0,
+    "ram_pico_mb": 526.1,
+    "detecciones_totales": 854,
+    "frames_con_deteccion": 814,
+    "confianza_media": 0.59,
+    "params": {
+      "imgsz": 640,
+      "conf": 0.5,
+      "vid_stride": 1,
+      "augment": false
+    }
+  },
+  {
+    "runtime": "hef",
+    "frames_procesados": 944,
+    "frames_descartados_warmup": 1,
+    "tiempo_total_s": 32.19,
+    "fps_medio": 29.49,
+    "latencia_media_ms": 33.91,
+    "latencia_p95_ms": 35.67,
+    "cpu_media_pct": 175.4,
+    "cpu_pico_pct": 210.7,
+    "ram_media_mb": 182.5,
+    "ram_pico_mb": 185.5,
+    "detecciones_totales": 894,
+    "frames_con_deteccion": 835,
+    "confianza_media": 0.58,
+    "params": {
+      "imgsz": 640,
+      "conf": 0.5,
+      "vid_stride": 1,
+      "augment": false
+    }
+  }
+]
