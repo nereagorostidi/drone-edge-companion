@@ -252,6 +252,39 @@ def hacer_arm():
     return False
 
 
+def hacer_force_arm():
+    """Arma los motores SALTANDO los pre-arm checks (GPS, calibraciones,
+    fallos de sensor...), con el mismo log detallado que hacer_arm().
+
+    A diferencia de hacer_arm() (que usa master.arducopter_arm(), un atajo
+    de pymavlink con param2 fijo a 0), aqui se envia el
+    MAV_CMD_COMPONENT_ARM_DISARM a mano con param2=21196 -- el numero
+    magico que exige ArduPilot para forzar el armado saltandose las
+    comprobaciones. Solo ENVIA el comando y consulta master.motors_armed()
+    (estado ya cacheado por el hilo lector); no vuelve a leer el puerto
+    MAVLink directamente. Uso excepcional, para cuando un pre-arm check
+    bloquea un armado que el operador ya ha verificado que es seguro.
+    """
+    log.info("Enviando comando FORCE ARM (saltando pre-arm checks) al autopiloto ...")
+    t0 = time.time()
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+        1, 21196, 0, 0, 0, 0, 0)
+
+    limite = time.time() + TIMEOUT_ARM_DISARM
+    while time.time() < limite and not master.motors_armed():
+        time.sleep(0.2)
+
+    if master.motors_armed():
+        log.info(f"  -> Dron ARMADO a la fuerza (confirmado por el autopiloto en {time.time()-t0:.2f}s)")
+        return True
+
+    log.warning(f"  -> El autopiloto NO ha confirmado el armado forzado tras {TIMEOUT_ARM_DISARM}s. "
+                f"Revisa los [STATUSTEXT autopiloto] del log para el motivo.")
+    return False
+
+
 def hacer_disarm():
     """Desarma los motores, con log detallado de todo el proceso.
 
@@ -586,6 +619,7 @@ def hacer_rtl(params=None):
 # Anadir un comando nuevo en el futuro = anadir una entrada aqui.
 ACCIONES = {
     "arm": lambda params: hacer_arm(),
+    "force_arm": lambda params: hacer_force_arm(),
     "disarm": lambda params: hacer_disarm(),
     "takeoff": hacer_takeoff,
     "hold": hacer_hold,
