@@ -10,6 +10,13 @@ Este script lee un sensor ambiental BME680 por I2C y envía las medidas
 a un broker MQTT (Mosquitto) alojado en un servidor EC2, que a su vez
 las almacena en InfluxDB.
 
+Mide temperatura, humedad, presión y resistencia de gas (la resistencia
+del sensor de VOCs del BME680, en Ohmios: sube en aire limpio y baja
+cuanto más compuestos organicos volatiles hay). Esta última necesita
+calentar una resistencia interna del chip; si aun no se ha estabilizado
+(los primeros segundos tras arrancar, ver 'heat_stable' mas abajo), se
+guarda como NULL en vez de un valor no fiable.
+
 Arquitectura "store-and-forward" (almacenar y reenviar):
 La captura y el envío están DESACOPLADOS. Cada lectura se guarda primero
 en una base de datos local (SQLite) que actúa como "fuente de verdad".
@@ -124,7 +131,19 @@ db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     temp REAL,               -- temperatura (°C)
     hum REAL,                -- humedad relativa (%)
     pres REAL,               -- presión (hPa)
+    gas REAL,                -- resistencia de gas (Ohmios); NULL si el
+                              -- calentador aun no estaba estable al leer
     enviado INTEGER DEFAULT 0)""")
+
+# Migracion para bases de datos ya existentes de antes de anadir 'gas':
+# CREATE TABLE IF NOT EXISTS no toca una tabla que ya existe, asi que en
+# un ambiental.db viejo (solo temp/hum/pres) hay que anadir la columna a
+# mano. Las filas antiguas quedan con gas=NULL; nada se pierde.
+columnas = {fila[1] for fila in db.execute("PRAGMA table_info(lecturas)")}
+if "gas" not in columnas:
+    db.execute("ALTER TABLE lecturas ADD COLUMN gas REAL")
+    print("Migracion: anadida la columna 'gas' a la tabla 'lecturas' existente.")
+
 db.commit()
 
 
@@ -138,7 +157,9 @@ if args.fake:
     print("MODO FAKE: se generan datos simulados, no se lee el BME680.")
     # Estado inicial de la simulación. Se parte de valores plausibles y en
     # cada lectura se les suma una pequeña variación (ver datos_simulados).
-    _sim = {"temp": 22.0, "hum": 48.0, "pres": 1013.0}
+    # 'gas' (Ohmios) parte de un valor tipico de aire de interior normal;
+    # en un BME680 real baja cuanto mas VOCs hay en el ambiente.
+    _sim = {"temp": 22.0, "hum": 48.0, "pres": 1013.0, "gas": 50000.0}
 else:
     import bme680
     # Dirección I2C 0x76 (SDO conectado a GND). Si el sensor apareciera en
@@ -152,6 +173,17 @@ else:
     sensor.set_temperature_oversample(bme680.OS_8X)
     # Filtro IIR: suaviza picos bruscos y transitorios en las lecturas.
     sensor.set_filter(bme680.FILTER_SIZE_3)
+
+    # Sensor de gas (VOCs): a diferencia de temp/hum/presion, viene
+    # DESACTIVADO por defecto y hace falta calentar una resistencia interna
+    # a una temperatura objetivo antes de que la lectura sea fiable
+    # (sensor.data.heat_stable, comprobado en leer_medida()). 320°C / 150ms
+    # son los valores de ejemplo recomendados por Bosch/Pimoroni para uso
+    # general; no hay una unica combinacion "correcta" para todos los casos.
+    sensor.set_gas_status(bme680.ENABLE_GAS_MEAS)
+    sensor.set_gas_heater_temperature(320)
+    sensor.set_gas_heater_duration(150)
+    sensor.select_gas_heater_profile(0)
 
 
 def _acota(valor, minimo, maximo):
@@ -170,22 +202,33 @@ def datos_simulados():
     _sim["temp"] = _acota(_sim["temp"] + random.uniform(-0.3, 0.3), 15.0, 30.0)
     _sim["hum"] = _acota(_sim["hum"] + random.uniform(-0.8, 0.8), 30.0, 70.0)
     _sim["pres"] = _acota(_sim["pres"] + random.uniform(-0.2, 0.2), 1000.0, 1025.0)
-    return (round(_sim["temp"], 2), round(_sim["hum"], 2), round(_sim["pres"], 2))
+    _sim["gas"] = _acota(_sim["gas"] + random.uniform(-1500, 1500), 10000.0, 150000.0)
+    return (round(_sim["temp"], 2), round(_sim["hum"], 2),
+            round(_sim["pres"], 2), round(_sim["gas"], 1))
 
 
 def leer_medida():
-    """Devuelve (temp, hum, pres), o None si aún no hay una medida válida.
+    """Devuelve (temp, hum, pres, gas), o None si aún no hay una medida válida.
 
     Encapsula el origen del dato: en modo normal lee el BME680; en modo
     --fake devuelve datos simulados. El resto del script no necesita saber
     de dónde viene la medida.
+
+    'gas' (resistencia en Ohmios) puede salir como None dentro de la propia
+    tupla aunque el resto de campos sean validos: el calentador del sensor
+    de VOCs tarda unos segundos en estabilizarse tras arrancar (o tras
+    cualquier variacion brusca), y sensor.data.heat_stable es False
+    mientras tanto. Se prefiere NULL a publicar una resistencia que todavia
+    no es de fiar.
     """
     if args.fake:
         return datos_simulados()
     if sensor.get_sensor_data():   # True cuando hay una medida válida lista
+        gas = round(sensor.data.gas_resistance, 1) if sensor.data.heat_stable else None
         return (round(sensor.data.temperature, 2),
                 round(sensor.data.humidity, 2),
-                round(sensor.data.pressure, 2))
+                round(sensor.data.pressure, 2),
+                gas)
     return None
 
 
@@ -272,10 +315,10 @@ def guardar():
     medida = leer_medida()
     if medida is None:     # aún no hay lectura válida del sensor
         return
-    temp, hum, pres = medida
+    temp, hum, pres, gas = medida
     db.execute(
-        "INSERT INTO lecturas (ts, temp, hum, pres) VALUES (?,?,?,?)",
-        (datetime.now().astimezone().isoformat(), temp, hum, pres))
+        "INSERT INTO lecturas (ts, temp, hum, pres, gas) VALUES (?,?,?,?,?)",
+        (datetime.now().astimezone().isoformat(), temp, hum, pres, gas))
     db.commit()
 
 
@@ -297,15 +340,18 @@ def reenviar():
 
     # Se recuperan las filas pendientes (enviado=0), en orden y por lotes.
     filas = db.execute(
-        "SELECT id, ts, temp, hum, pres FROM lecturas "
+        "SELECT id, ts, temp, hum, pres, gas FROM lecturas "
         "WHERE enviado=0 ORDER BY id LIMIT ?", (LOTE,)).fetchall()
 
-    for id_, ts, temp, hum, pres in filas:
+    for id_, ts, temp, hum, pres, gas in filas:
         # El JSON mantiene el mismo formato que espera el puente del EC2.
+        # 'resistencia_gas_ohm' puede ir a null (fila guardada mientras el
+        # calentador del sensor de gas aun no estaba estable).
         payload = json.dumps({
             "temperatura": temp,
             "humedad": hum,
             "presion": pres,
+            "resistencia_gas_ohm": gas,
             "timestamp": ts
         })
         try:

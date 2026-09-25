@@ -133,7 +133,7 @@ parser.add_argument('--camera', type=_fuente_camara, default=None, metavar='INDI
                           "o ruta de dispositivo (/dev/video0). No se puede combinar con video_path")
 parser.add_argument('--conf', type=float, default=0.5,
                      help='Confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)')
-parser.add_argument('--vid-stride', type=int, default=6,
+parser.add_argument('--vid-stride', type=int, default=2,
                      help='Analiza 1 de cada N frames (1 = analiza todos; subirlo va mas rapido pero puede saltarse personas que pasan rapido)')
 parser.add_argument('--augment', action=argparse.BooleanOptionalAction, default=True,
                      help='Test-time augmentation: analiza cada frame varias veces (flips/escalas) y combina resultados, mas preciso pero mas lento. Usa --no-augment para desactivarlo')

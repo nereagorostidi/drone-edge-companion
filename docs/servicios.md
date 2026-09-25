@@ -46,3 +46,27 @@ journalctl -u deteccion-sar.service -f
 journalctl -u receptor-sar.service -f
 ```
 
+## Limpieza semanal de los buffers (cron)
+Cada dominio guarda sus lecturas en un buffer SQLite y solo las marca como enviadas (`enviado=1`), sin borrarlas: con el tiempo esas filas ya entregadas solo ocupan espacio en la tarjeta SD (`vuelo.db`, a 1 lectura por segundo, es el que más crece). `limpia.py` borra de los cuatro buffers (`ambiental.db`, `sistema.db`, `vuelo.db`, `deteccion.db`) todas las filas con `enviado=1` y ejecuta `VACUUM` para que el fichero `.db` se encoja de verdad — borrar filas por sí solo no libera espacio en disco. **Nunca toca las filas pendientes (`enviado=0`).**
+
+Probarlo a mano antes de programarlo (`--dry-run` solo cuenta lo que borraría, sin modificar nada):
+```bash
+source /home/nerea/drone-edge-companion/venv/bin/activate
+python limpia.py --dry-run
+python limpia.py
+```
+Se puede ejecutar con los servicios en marcha: borra por lotes con commit entre cada uno y espera hasta 60 s a que un servicio suelte la base de datos, así que no hace falta pararlos. Un buffer cuyo fichero no existe (p. ej. `deteccion.db` si nunca se ha usado) se salta sin crearlo.
+
+Programarlo con cron para que corra cada domingo a las 21:00 (con el usuario `nerea`, el mismo que ejecuta los servicios y es dueño de los `.db` — no usar `sudo crontab`):
+```bash
+crontab -e
+```
+y añadir esta línea (`0 21 * * 0` = minuto 0, hora 21, cualquier día del mes y mes, domingo; cambiar el último `0` por otro día de la semana `0-6` si se prefiere; el cron usa la hora del sistema de la Pi, comprobar con `date`):
+```
+0 21 * * 0 /home/nerea/drone-edge-companion/venv/bin/python /home/nerea/drone-edge-companion/limpia.py >> /home/nerea/drone-edge-companion/limpia.log 2>&1
+```
+Se usan rutas absolutas porque cron arranca con un entorno mínimo (sin el `venv` activado ni el directorio del proyecto como directorio actual). Comprobar que quedó programado con `crontab -l`, y después de la primera ejecución, el resultado (filas borradas y espacio liberado por buffer) queda en `limpia.log`:
+```bash
+tail -n 20 /home/nerea/drone-edge-companion/limpia.log
+```
+

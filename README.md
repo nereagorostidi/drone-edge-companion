@@ -7,7 +7,7 @@ Cada dominio es un script independiente que sigue la misma plantilla store-and-f
 
 | Dominio | Script | Publica en | Descripción |
 |---|---|---|---|
-| `ambiental` | `sensor.py` | `dronsar/{dron_id}/ambiental` | Lectura del BME680 (temperatura, humedad, presión) |
+| `ambiental` | `sensor.py` | `dronsar/{dron_id}/ambiental` | Lectura del BME680 (temperatura, humedad, presión, resistencia de gas/VOCs) |
 | `sistema` | `sistema.py` | `dronsar/{dron_id}/sistema` | Estado del nodo edge: CPU, temperatura, RAM, disco, throttling, uptime |
 | `vuelo` | `vuelo.py` | `dronsar/{dron_id}/vuelo` | Telemetría de vuelo (posición, actitud, batería, GPS, modo). Además escribe `posicion_actual.json` con la última posición conocida |
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion` | Detección de personas con YOLO sobre un vídeo o cámara en vivo (`--camera`); adjunta a cada alerta la posición del dron leída de `posicion_actual.json` y el nombre de la foto guardada de esa detección |
@@ -19,7 +19,7 @@ Este README cubre lo esencial para arrancar y operar el nodo edge. Para temas m�
 - [docs/instalacion-hardware.md](docs/instalacion-hardware.md) — cableado del sensor BME680 y, si se va a volar con el Pixhawk real, la conexión serie por TELEM3 (requisito solo para producción, no para SITL con Mission Planner).
 - [docs/flujos.md](docs/flujos.md) — cómo circulan los datos: flujo de telemetría, flujo de comandos y flujo de configuración en caliente.
 - [docs/mavlink.md](docs/mavlink.md) — conexión real contra el Pixhawk por TELEM3, por qué hace falta `mavlink-router`, y los scripts de prueba de la conexión serie.
-- [docs/servicios.md](docs/servicios.md) — instalación de cada proceso como servicio systemd.
+- [docs/servicios.md](docs/servicios.md) — instalación de cada proceso como servicio systemd y programación con cron de la limpieza semanal de los buffers (`limpia.py`).
 - [docs/video.md](docs/video.md) — `deteccion.py`: opciones de línea de comandos, motores de ejecución (YOLO/ONNX/NCNN) y generación de pesos, streaming en directo, arranque/parada remota.
 
 ## Estructura del repositorio
@@ -49,9 +49,10 @@ Este README cubre lo esencial para arrancar y operar el nodo edge. Para temas m�
 - `vuelo-sar.service` — Servicio systemd del dominio `vuelo` (`vuelo.py`).
 - `deteccion-sar.service` — Servicio systemd de la detección (`deteccion.py`); requiere editar la fuente (ruta de vídeo o `--camera`) antes de instalarlo.
 - `receptor-sar.service` — Servicio systemd del receptor de comandos (`receptor.py`).
+- `limpia.py` — Mantenimiento de los buffers store-and-forward: borra de `ambiental.db`, `sistema.db`, `vuelo.db` y `deteccion.db` las filas ya enviadas (`enviado=1`) y compacta los ficheros (`VACUUM`) para liberar espacio en la tarjeta SD; nunca toca las pendientes (`enviado=0`). Se programa con cron cada domingo a las 21:00 (ver [docs/servicios.md](docs/servicios.md#limpieza-semanal-de-los-buffers-cron)); `--dry-run` solo cuenta lo que borraría.
 - `requirements.txt` — Dependencias de los 5 dominios (instala siempre todo junto, pensado para el nodo completo en la Pi).
 - `.env.example` — Plantilla de variables de entorno (copiar a `.env`).
-- `.gitignore` — Excluye el entorno virtual, el `.env`, las bases de datos locales (`*.db`), las salidas generadas por `deteccion.py` (`results/`) y, de `generate_all_formats.py`: `dataset/`, `compiler_env/`, `vendor/`, `build/` y `weights_prev/`.
+- `.gitignore` — Excluye el entorno virtual, el `.env`, las bases de datos locales (`*.db`), el log de la limpieza semanal (`limpia.log`), las salidas generadas por `deteccion.py` (`results/`) y, de `generate_all_formats.py`: `dataset/`, `compiler_env/`, `vendor/`, `build/` y `weights_prev/`.
 
 ## Requisitos
 - Raspberry Pi 5 con Raspberry Pi OS (Bookworm) y fuente oficial de 27 W (5 V / 5 A)
