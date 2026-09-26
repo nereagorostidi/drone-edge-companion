@@ -312,6 +312,13 @@ if not fps_original or fps_original <= 1:
     fps_original = 20.0
     print(f"Aviso: la fuente no informa un FPS valido; se usa {fps_original} por defecto.")
 
+# FPS del vídeo que se GRABA: se escribe un fotograma por cada fotograma
+# analizado (1 de cada VID_STRIDE), así que el fichero va a fps_original /
+# VID_STRIDE. Si la inferencia no llega a ese ritmo, el vídeo dura MENOS que la
+# sesión real: por eso las posiciones dentro del fichero (tiempo_en_video_s,
+# duracion_fichero_s) se calculan por número de fotograma, no por el reloj.
+FPS_VIDEO = fps_original / VID_STRIDE
+
 
 # =====================================================================
 #  BUFFER LOCAL + CLIENTE MQTT  (solo si MQTT_ON)
@@ -452,6 +459,14 @@ def _dibujar_overlay(frame, pos, ts):
     return frame
 
 
+def _tamano_fichero(ruta):
+    """Tamaño en bytes de un fichero, o None si no existe o no se puede leer."""
+    try:
+        return os.path.getsize(ruta)
+    except OSError:
+        return None
+
+
 def guardar_foto(frame, pos, ts):
     """Guarda el frame donde se ha detectado una persona.
 
@@ -491,7 +506,8 @@ def reenviar():
             break
 
 
-def procesar_detecciones(r, foto_nombre, ts, pos):
+def procesar_detecciones(r, foto_nombre, ts, pos, foto_bytes=None, tiempo_en_video_s=None,
+                         video_fichero=None):
     """Convierte las cajas detectadas en un frame en alertas y las encola.
 
     Emite una alerta por persona, todas con el mismo 'foto' y la misma
@@ -536,6 +552,13 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
             "dron": dron,
             # Nombre del JPEG guardado en results/fotos/ con este frame.
             "foto": foto_nombre,
+            # Tamaño de esa foto en bytes (para estimar el consumo de disco).
+            "tamano_bytes": foto_bytes,
+            # Vídeo de la sesión en el que está este frame (mismo nombre que
+            # video.fichero del resumen) y segundo en que aparece dentro de él:
+            # juntos permiten abrir ese vídeo y saltar directamente al instante.
+            "video_fichero": video_fichero,
+            "tiempo_en_video_s": tiempo_en_video_s,
             "timestamp": ts_iso,
         }
         guardar_deteccion(ts_iso, json.dumps(mensaje))
@@ -556,7 +579,8 @@ def _percentil(valores, p):
 
 
 def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias_ms,
-                            alertas_total, confianzas_alertas):
+                            alertas_total, confianzas_alertas,
+                            tamano_bytes=None, duracion_fichero_s=None):
     """Publica el resumen de una sesión de grabación que acaba de terminar.
 
     Formato acordado con el tutor, topic dronsar/{dron_id}/video/resumen.
@@ -579,8 +603,14 @@ def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias
         "dron_id": DRON_ID,
         "video": {
             "fichero": fichero_video,
+            # Duración de la SESIÓN (reloj: de start_recording a stop_recording).
             "duracion_segundos": round((fin - inicio).total_seconds(), 1),
+            # Duración del FICHERO grabado (frames / FPS del vídeo). Es menor que
+            # la de la sesión si la inferencia no mantiene el ritmo del vídeo.
+            "duracion_fichero_s": duracion_fichero_s,
             "frames_totales": frames_totales,
+            # Tamaño del .mp4 en bytes (para estimar el consumo de disco).
+            "tamano_bytes": tamano_bytes,
         },
         "rendimiento": {
             "runtime": args.runtime,
@@ -697,7 +727,7 @@ try:
                 writer = cv2.VideoWriter(
                     output_path,
                     cv2.VideoWriter_fourcc(*'mp4v'),
-                    fps_original / VID_STRIDE,
+                    FPS_VIDEO,
                     (w, h),
                 )
                 # Arrancamos el emisor en directo a la vez que el vídeo local,
@@ -724,7 +754,13 @@ try:
                         print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
                               "¿Está vuelo.py en marcha en la misma carpeta?)")
                     foto_nombre = guardar_foto(annotated_frame, pos, ts)
-                    confs = procesar_detecciones(r, foto_nombre, ts, pos)
+                    foto_bytes = _tamano_fichero(os.path.join(FOTOS_DIR, foto_nombre))
+                    # Este frame es el nº len(tiempos_inferencia) escrito en el
+                    # vídeo (ya se ha hecho writer.write), así que su posición
+                    # en el fichero es (n - 1) / FPS_VIDEO segundos.
+                    tiempo_en_video_s = round((len(tiempos_inferencia) - 1) / FPS_VIDEO, 2)
+                    confs = procesar_detecciones(r, foto_nombre, ts, pos,
+                                                 foto_bytes, tiempo_en_video_s, nombre_video)
                     alertas_sesion += len(confs)
                     confianzas_sesion.extend(confs)
                     ultimo_envio = ahora
@@ -805,6 +841,10 @@ try:
                 latencias_ms=latencias_ms,
                 alertas_total=alertas_sesion,
                 confianzas_alertas=confianzas_sesion,
+                # El writer ya se ha cerrado arriba: el .mp4 está completo en disco.
+                tamano_bytes=_tamano_fichero(output_path),
+                duracion_fichero_s=(round(len(tiempos_inferencia) / FPS_VIDEO, 1)
+                                    if tiempos_inferencia else None),
             )
 
         if not ESPERA_COMANDO:
