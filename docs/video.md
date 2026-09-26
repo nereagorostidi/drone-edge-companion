@@ -82,4 +82,4 @@ Al recibir `start_recording` arranca la sesión completa (vídeo anotado, previe
 
 Con un fichero de vídeo, o con `--mqtt false`, no hay nada que esperar: `deteccion.py` arranca directo, como siempre (estos comandos no tienen efecto en ese caso).
 
-Instalación como servicio systemd (`deteccion-sar.service`) y sus particularidades (índice de cámara, `--runtime ncnn` por defecto, política de reinicio) en [docs/servicios.md](servicios.md#particularidad-de-deteccion-sarservice).
+Instalación como servicio systemd (`deteccion-sar.service`) y sus particularidades (índice de cámara, `--runtime hef` por defecto, política de reinicio) en [docs/servicios.md](servicios.md#particularidad-de-deteccion-sarservice).
