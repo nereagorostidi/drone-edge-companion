@@ -7,7 +7,7 @@
 =====================================================================
 
 Este script recoge métricas del propio nodo edge (CPU, temperatura, RAM,
-disco, throttling y uptime) y las envía a un broker MQTT (Mosquitto) del
+disco, throttling, uptime y carga media) y las envía a un broker MQTT (Mosquitto) del
 servidor EC2, que a su vez las almacena en InfluxDB.
 
 Sigue la MISMA plantilla que el colector ambiental (sensor.py): captura,
@@ -19,7 +19,7 @@ Este proceso cubre el DOMINIO SISTEMA. Publica en dronsar/{dron_id}/sistema,
 con el identificador del dron leído del .env.
 
 Origen de los datos:
-    - psutil       -> CPU, RAM, disco, uptime (multiplataforma).
+    - psutil       -> CPU, RAM, disco, uptime y carga media (multiplataforma).
     - vcgencmd     -> código de throttling (SOLO Raspberry Pi). Fuera de
                       una Pi, el campo se guarda como "no_disp".
 
@@ -109,7 +109,20 @@ db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     disco_pct REAL,          -- uso de disco (%)
     throttled TEXT,          -- código de throttling de la Pi (o "no_disp")
     uptime_s INTEGER,        -- segundos desde el arranque
+    load_1m REAL,            -- carga media del último minuto
+    load_5m REAL,            -- carga media de los últimos 5 minutos
+    load_15m REAL,           -- carga media de los últimos 15 minutos
     enviado INTEGER DEFAULT 0)""")
+
+# Migracion para bases de datos ya existentes de antes de anadir la carga
+# media: CREATE TABLE IF NOT EXISTS no toca una tabla que ya existe, asi que
+# en un sistema.db viejo hay que anadir las columnas a mano. Las filas
+# antiguas quedan con NULL en ellas; nada se pierde.
+columnas = {fila[1] for fila in db.execute("PRAGMA table_info(lecturas)")}
+for col in ("load_1m", "load_5m", "load_15m"):
+    if col not in columnas:
+        db.execute(f"ALTER TABLE lecturas ADD COLUMN {col} REAL")
+        print(f"Migracion: anadida la columna '{col}' a la tabla 'lecturas' existente.")
 db.commit()
 
 
@@ -163,12 +176,29 @@ def _leer_cpu_temp():
         return None
 
 
+def _leer_carga_media():
+    """Carga media del sistema a 1, 5 y 15 minutos, o (None, None, None).
+
+    La carga media ("load average") es el número medio de procesos que están
+    usando la CPU o esperando para usarla. A diferencia de cpu_pct, que es una
+    foto del instante, muestra la TENDENCIA: si la carga de 15 min se mantiene
+    por encima del número de núcleos (4 en la Raspberry Pi 5), el equipo está
+    saturado de forma sostenida (detección + streaming + comunicaciones), no
+    solo en un pico puntual.
+    """
+    try:
+        return tuple(round(v, 2) for v in psutil.getloadavg())
+    except (AttributeError, OSError):
+        return (None, None, None)
+
+
 def leer_medida():
     """Devuelve un dict con las métricas del sistema.
 
-    cpu_temp puede ser None si el equipo no expone la temperatura, en cuyo
-    caso ese campo no se envía.
+    cpu_temp (y la carga media) pueden ser None si el equipo no los expone,
+    en cuyo caso esos campos no se envían.
     """
+    load_1m, load_5m, load_15m = _leer_carga_media()
     return {
         "cpu_pct": round(psutil.cpu_percent(interval=None), 1),
         "cpu_temp": _leer_cpu_temp(),
@@ -176,6 +206,9 @@ def leer_medida():
         "disco_pct": round(psutil.disk_usage("/").percent, 1),
         "throttled": _leer_throttled(),
         "uptime_s": int(time.time() - psutil.boot_time()),
+        "load_1m": load_1m,
+        "load_5m": load_5m,
+        "load_15m": load_15m,
     }
 
 
@@ -241,11 +274,13 @@ def guardar():
     m = leer_medida()
     db.execute(
         "INSERT INTO lecturas "
-        "(ts, cpu_pct, cpu_temp, ram_pct, disco_pct, throttled, uptime_s) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "(ts, cpu_pct, cpu_temp, ram_pct, disco_pct, throttled, uptime_s, "
+        "load_1m, load_5m, load_15m) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (datetime.now().astimezone().isoformat(),
          m["cpu_pct"], m["cpu_temp"], m["ram_pct"],
-         m["disco_pct"], m["throttled"], m["uptime_s"]))
+         m["disco_pct"], m["throttled"], m["uptime_s"],
+         m["load_1m"], m["load_5m"], m["load_15m"]))
     db.commit()
 
 
@@ -263,10 +298,12 @@ def reenviar():
 
     filas = db.execute(
         "SELECT id, ts, cpu_pct, cpu_temp, ram_pct, disco_pct, throttled, "
-        "uptime_s FROM lecturas WHERE enviado=0 ORDER BY id LIMIT ?",
+        "uptime_s, load_1m, load_5m, load_15m "
+        "FROM lecturas WHERE enviado=0 ORDER BY id LIMIT ?",
         (LOTE,)).fetchall()
 
-    for id_, ts, cpu_pct, cpu_temp, ram_pct, disco_pct, throttled, uptime_s in filas:
+    for (id_, ts, cpu_pct, cpu_temp, ram_pct, disco_pct, throttled, uptime_s,
+         load_1m, load_5m, load_15m) in filas:
         # Se construye el JSON y se omiten los campos nulos (p. ej. cpu_temp
         # cuando el equipo no expone la temperatura), para no enviar "null".
         datos = {
@@ -276,6 +313,9 @@ def reenviar():
             "disco_pct": disco_pct,
             "throttled": throttled,
             "uptime_s": uptime_s,
+            "load_avg_1m": load_1m,
+            "load_avg_5m": load_5m,
+            "load_avg_15m": load_15m,
             "timestamp": ts,
         }
         payload = json.dumps({k: v for k, v in datos.items() if v is not None})

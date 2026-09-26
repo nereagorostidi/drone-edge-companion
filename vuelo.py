@@ -246,6 +246,51 @@ if not args.fake:
           f"componente {master.target_component}")
 
 
+# =====================================================================
+#  PETICIÓN DE MENSAJES AL AUTOPILOTO
+# =====================================================================
+# ArduPilot solo envía por cada puerto MAVLink los mensajes que tenga
+# configurados en sus parámetros de tasa (MAVn_EXT_STAT, MAVn_POSITION...)
+# o los que alguien le pida. En este Pixhawk esas tasas están a 0 en todos
+# los canales, así que por TELEM3 solo llega el HEARTBEAT (de ahí salen
+# 'modo' y 'armado') y el resto de campos se quedaban a 0.
+# En SITL no se notaba porque Mission Planner ya pedía estos mensajes.
+#
+# Se usa MAV_CMD_SET_MESSAGE_INTERVAL (param1 = id del mensaje, param2 =
+# intervalo en microsegundos). El autopiloto lo aplica al canal por el que
+# llega la orden (TELEM3) y NO lo guarda en parámetros: si el Pixhawk se
+# reinicia, se pierde. Por eso se repite periódicamente (ver datos_mavlink).
+# El destino es siempre MAV_COMP_ID_AUTOPILOT1: con mavlink-router, los
+# procesos de la Pi comparten SYSID con el vehículo y el primer heartbeat
+# recibido no tiene por qué venir del autopiloto.
+MENSAJES_HZ = {
+    1: 2,     # SYS_STATUS          -> bateria_v, corriente_a, bateria_pct
+    24: 2,    # GPS_RAW_INT         -> satelites, fix_type
+    30: 4,    # ATTITUDE            -> roll, pitch, yaw
+    33: 4,    # GLOBAL_POSITION_INT -> lat, lon, alt_rel, rumbo
+    74: 2,    # VFR_HUD             -> vel_terreno
+}
+REPETIR_PETICION_S = 30
+_ultima_peticion = 0.0
+
+
+def solicitar_mensajes():
+    """Pide al autopiloto los mensajes que usa este dominio, con su tasa."""
+    global _ultima_peticion
+    for msg_id, hz in MENSAJES_HZ.items():
+        master.mav.command_long_send(
+            master.target_system, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            msg_id, int(1_000_000 / hz), 0, 0, 0, 0, 0)
+    _ultima_peticion = time.time()
+
+
+if master is not None:
+    solicitar_mensajes()
+    print(f"Solicitados {len(MENSAJES_HZ)} mensajes MAVLink al autopiloto "
+          f"(se repite cada {REPETIR_PETICION_S} s).")
+
+
 def _drenar_mavlink():
     """Procesa todos los mensajes MAVLink ya recibidos, sin bloquear.
 
@@ -258,53 +303,85 @@ def _drenar_mavlink():
         pass
 
 
+# Un mensaje MAVLink que lleva más de MAX_EDAD_MSG segundos sin llegar ya no
+# describe el estado actual del dron (enlace TELEM3 caído, Pixhawk reiniciado...).
+# En ese caso sus campos se envían como null en vez de repetir el último valor.
+MAX_EDAD_MSG = 5.0
+
+
+def _fresco(msg):
+    """Devuelve el mensaje si ha llegado hace menos de MAX_EDAD_MSG s, o None."""
+    if msg is None:
+        return None
+    # pymavlink anota en _timestamp la hora local de recepción de cada mensaje.
+    if time.time() - getattr(msg, "_timestamp", 0.0) > MAX_EDAD_MSG:
+        return None
+    return msg
+
+
+def _r(valor, decimales):
+    """round() que deja pasar None (dato no disponible)."""
+    return None if valor is None else round(valor, decimales)
+
+
 def datos_mavlink():
     """Lee la última telemetría conocida del autopiloto por MAVLink.
 
     Cada dato viene de un tipo de mensaje distinto (llegan a ritmos
-    diferentes), así que se usa el último valor visto de cada uno; si
-    alguno todavía no ha llegado (justo al arrancar), se devuelve 0 /
-    valor neutro en su lugar.
+    diferentes), así que se usa el último valor visto de cada uno.
+
+    Si un dato NO está disponible se devuelve None (null en el JSON), nunca 0:
+      - el mensaje todavía no ha llegado (justo al arrancar) o está caducado;
+      - el autopiloto envía su valor de "desconocido" (65535, -1, 255...);
+      - lat/lon: sin posición estimada, ArduPilot envía lat = lon = 0, que no
+        es una posición real (sería el golfo de Guinea).
+    Un 0 falso se confunde con una medida real (0 V, 0 satélites); un null no.
+    El puente del servidor descarta los campos null, así que en InfluxDB/Grafana
+    quedan como hueco. deteccion.py ya trata lat/lon null como "sin posición".
     """
+    if time.time() - _ultima_peticion > REPETIR_PETICION_S:
+        solicitar_mensajes()      # por si el Pixhawk se ha reiniciado
     _drenar_mavlink()
     msgs = master.messages
 
-    pos = msgs.get("GLOBAL_POSITION_INT")
-    att = msgs.get("ATTITUDE")
-    vfr = msgs.get("VFR_HUD")
-    gps = msgs.get("GPS_RAW_INT")
-    bat = msgs.get("SYS_STATUS")
+    pos = _fresco(msgs.get("GLOBAL_POSITION_INT"))
+    att = _fresco(msgs.get("ATTITUDE"))
+    vfr = _fresco(msgs.get("VFR_HUD"))
+    gps = _fresco(msgs.get("GPS_RAW_INT"))
+    bat = _fresco(msgs.get("SYS_STATUS"))
 
-    lat = pos.lat / 1e7 if pos else 0.0
-    lon = pos.lon / 1e7 if pos else 0.0
-    alt_rel = pos.relative_alt / 1000.0 if pos else 0.0
-    rumbo = pos.hdg / 100.0 if pos and pos.hdg != 65535 else 0.0
+    tiene_posicion = pos is not None and not (pos.lat == 0 and pos.lon == 0)
+    lat = pos.lat / 1e7 if tiene_posicion else None
+    lon = pos.lon / 1e7 if tiene_posicion else None
+    # La altura relativa sale del barómetro: es válida aunque no haya GPS.
+    alt_rel = pos.relative_alt / 1000.0 if pos else None
+    rumbo = pos.hdg / 100.0 if pos and pos.hdg != 65535 else None
 
-    vel_terreno = vfr.groundspeed if vfr else 0.0
+    vel_terreno = vfr.groundspeed if vfr else None
 
-    roll = math.degrees(att.roll) if att else 0.0
-    pitch = math.degrees(att.pitch) if att else 0.0
-    yaw = math.degrees(att.yaw) % 360 if att else 0.0
+    roll = math.degrees(att.roll) if att else None
+    pitch = math.degrees(att.pitch) if att else None
+    yaw = math.degrees(att.yaw) % 360 if att else None
 
-    bateria_v = bat.voltage_battery / 1000.0 if bat and bat.voltage_battery != 65535 else 0.0
-    bateria_pct = bat.battery_remaining if bat and bat.battery_remaining != -1 else 0
-    corriente_a = bat.current_battery / 100.0 if bat and bat.current_battery != -1 else 0.0
+    bateria_v = bat.voltage_battery / 1000.0 if bat and bat.voltage_battery != 65535 else None
+    bateria_pct = bat.battery_remaining if bat and bat.battery_remaining != -1 else None
+    corriente_a = bat.current_battery / 100.0 if bat and bat.current_battery != -1 else None
 
-    satelites = gps.satellites_visible if gps and gps.satellites_visible != 255 else 0
-    fix_type = gps.fix_type if gps else 0
+    satelites = gps.satellites_visible if gps and gps.satellites_visible != 255 else None
+    fix_type = gps.fix_type if gps else None
 
     return {
-        "lat": round(lat, 7),
-        "lon": round(lon, 7),
-        "alt_rel": round(alt_rel, 1),
-        "vel_terreno": round(vel_terreno, 1),
-        "rumbo": round(rumbo, 1),
-        "roll": round(roll, 1),
-        "pitch": round(pitch, 1),
-        "yaw": round(yaw, 1),
-        "bateria_v": round(bateria_v, 2),
-        "bateria_pct": int(bateria_pct),
-        "corriente_a": round(corriente_a, 1),
+        "lat": _r(lat, 7),
+        "lon": _r(lon, 7),
+        "alt_rel": _r(alt_rel, 1),
+        "vel_terreno": _r(vel_terreno, 1),
+        "rumbo": _r(rumbo, 1),
+        "roll": _r(roll, 1),
+        "pitch": _r(pitch, 1),
+        "yaw": _r(yaw, 1),
+        "bateria_v": _r(bateria_v, 2),
+        "bateria_pct": None if bateria_pct is None else int(bateria_pct),
+        "corriente_a": _r(corriente_a, 1),
         "satelites": satelites,
         "fix_type": fix_type,
         "modo": master.flightmode or "DESCONOCIDO",
