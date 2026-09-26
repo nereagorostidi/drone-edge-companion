@@ -124,7 +124,10 @@ if missing:
 # por batería LiPo. Cada lectura se guarda con una marca "enviado":
 #   enviado = 0  -> pendiente de enviar
 #   enviado = 1  -> confirmado por el broker
-db = sqlite3.connect(DB)
+# timeout=60: si limpia.py está compactando la base de datos (VACUUM la
+# bloquea entera), se espera hasta 60 s en vez de fallar a los 5 s por
+# defecto con "database is locked" y tumbar el servicio.
+db = sqlite3.connect(DB, timeout=60)
 db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT,                 -- hora de captura en formato ISO 8601

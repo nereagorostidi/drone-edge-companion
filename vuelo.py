@@ -154,7 +154,10 @@ LIM_LON = 150.0 / (_M_POR_GRADO_LAT * math.cos(math.radians(BASE_LAT)))
 # campo, se guarda el JSON completo del mensaje en una sola columna
 # 'payload'. Es más limpio para este dominio y no cambia nada aguas abajo:
 # el buffer solo tiene que almacenar y reenviar, no consultar campo a campo.
-db = sqlite3.connect(DB)
+# timeout=60: si limpia.py está compactando la base de datos (VACUUM la
+# bloquea entera), se espera hasta 60 s en vez de fallar a los 5 s por
+# defecto con "database is locked" y tumbar el servicio.
+db = sqlite3.connect(DB, timeout=60)
 db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT,                 -- hora de captura en formato ISO 8601

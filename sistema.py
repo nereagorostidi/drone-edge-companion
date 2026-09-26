@@ -99,7 +99,10 @@ if missing:
 # Mismo principio que en el colector ambiental: SQLite en disco, cada fila
 # con una marca "enviado" (0 pendiente, 1 confirmado por el broker). Lo que
 # cambia son las columnas, adaptadas a las métricas del sistema.
-db = sqlite3.connect(DB)
+# timeout=60: si limpia.py está compactando la base de datos (VACUUM la
+# bloquea entera), se espera hasta 60 s en vez de fallar a los 5 s por
+# defecto con "database is locked" y tumbar el servicio.
+db = sqlite3.connect(DB, timeout=60)
 db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT,                 -- hora de captura en formato ISO 8601
