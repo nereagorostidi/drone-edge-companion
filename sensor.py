@@ -37,11 +37,11 @@ Uso:
     python3 sensor.py --fake -i 2     # simulados y rápido, para pruebas
 
 Variables de entorno (.env):
-    DRON_ID     identificador del dron (p. ej. dron01)   [obligatoria]
-    EC2_HOST    IP o dominio del broker MQTT             [obligatoria]
-    MQTT_PORT   puerto MQTT (por defecto 1883)
-    BUFFER_DB   ruta del buffer SQLite
-    LOTE        filas enviadas por ciclo (por defecto 50)
+    DRON_ID      identificador del dron (p. ej. dron01)   [obligatoria]
+    EC2_HOST     IP o dominio del broker MQTT               [obligatoria]
+    MQTT_PORT    puerto MQTT (por defecto 1883)
+    BUFFER_DB    ruta del buffer SQLite
+    LOTE         filas enviadas por ciclo (por defecto 50)
 """
 
 import os
@@ -87,12 +87,12 @@ args = parser.parse_args()
 # Todas las variables sensibles y configurables se cargan desde el .env,
 # nunca hardcodeadas en el código. Esto permite versionar el script en
 # público sin exponer credenciales ni infraestructura.
-DOMINIO = "ambiental"                                        # dominio de este proceso
-DRON_ID = os.getenv("DRON_ID")                               # identificador del dron
-EC2_HOST = os.getenv("EC2_HOST")                             # IP o dominio del broker
-PORT = int(os.getenv("MQTT_PORT", 1883))                     # Puerto MQTT
+DOMINIO = "ambiental"                                       # dominio de este proceso
+DRON_ID = os.getenv("DRON_ID")                             # identificador del dron
+EC2_HOST = os.getenv("EC2_HOST")                           # IP o dominio del broker
+PORT = int(os.getenv("MQTT_PORT", 1883))                   # Puerto MQTT
 DB = os.getenv("BUFFER_SENSOR", f"./{DOMINIO}.db")
-LOTE = int(os.getenv("LOTE", 50))                            # Filas por ciclo
+LOTE = int(os.getenv("LOTE", 50))                          # Filas por ciclo
 
 # El topic y el client_id se CONSTRUYEN a partir del identificador del dron,
 # no se escriben a mano. Así el mismo código sirve para cualquier unidad:
@@ -130,11 +130,11 @@ if missing:
 db = sqlite3.connect(DB, timeout=60)
 db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT,                 -- hora de captura en formato ISO 8601
-    temp REAL,               -- temperatura (°C)
-    hum REAL,                -- humedad relativa (%)
-    pres REAL,               -- presión (hPa)
-    gas REAL,                -- resistencia de gas (Ohmios); NULL si el
+    ts TEXT,                  -- hora de captura en formato ISO 8601
+    temp REAL,                -- temperatura (°C)
+    hum REAL,                 -- humedad relativa (%)
+    pres REAL,                -- presión (hPa)
+    gas REAL,                 -- resistencia de gas (Ohmios); NULL si el
                               -- calentador aun no estaba estable al leer
     enviado INTEGER DEFAULT 0)""")
 
@@ -165,9 +165,18 @@ if args.fake:
     _sim = {"temp": 22.0, "hum": 48.0, "pres": 1013.0, "gas": 50000.0}
 else:
     import bme680
-    # Dirección I2C 0x76 (SDO conectado a GND). Si el sensor apareciera en
-    # 0x77 con "i2cdetect -y 1", cambiar a bme680.I2C_ADDR_SECONDARY.
-    sensor = bme680.BME680(bme680.I2C_ADDR_PRIMARY)
+    sensor = None
+    # Auto-detección de la dirección I2C (0x76 primaria o 0x77 secundaria)
+    for addr in [bme680.I2C_ADDR_PRIMARY, bme680.I2C_ADDR_SECONDARY]:
+        try:
+            sensor = bme680.BME680(addr)
+            print(f"Sensor BME680 inicializado correctamente en I2C 0x{addr:02x}")
+            break
+        except (RuntimeError, IOError, OSError) as e:
+            print(f"Aviso: BME680 no responde en 0x{addr:02x}: {e}")
+
+    if sensor is None:
+        raise RuntimeError("No se pudo identificar el BME680 ni en 0x76 ni en 0x77 (Revisar bus I2C).")
 
     # Sobremuestreo (oversampling): promedia varias medidas internas para
     # reducir el ruido. Más oversampling = medida más estable pero más lenta.
@@ -226,12 +235,15 @@ def leer_medida():
     """
     if args.fake:
         return datos_simulados()
-    if sensor.get_sensor_data():   # True cuando hay una medida válida lista
-        gas = round(sensor.data.gas_resistance, 1) if sensor.data.heat_stable else None
-        return (round(sensor.data.temperature, 2),
-                round(sensor.data.humidity, 2),
-                round(sensor.data.pressure, 2),
-                gas)
+    try:
+        if sensor.get_sensor_data():    # True cuando hay una medida válida lista
+            gas = round(sensor.data.gas_resistance, 1) if sensor.data.heat_stable else None
+            return (round(sensor.data.temperature, 2),
+                    round(sensor.data.humidity, 2),
+                    round(sensor.data.pressure, 2),
+                    gas)
+    except (IOError, OSError) as e:
+        print(f"Error de bus I2C al leer el BME680: {e}")
     return None
 
 
@@ -316,7 +328,7 @@ def guardar():
     con su instante real y no con el de la reconexión.
     """
     medida = leer_medida()
-    if medida is None:     # aún no hay lectura válida del sensor
+    if medida is None:       # aún no hay lectura válida del sensor
         return
     temp, hum, pres, gas = medida
     db.execute(
