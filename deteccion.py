@@ -96,7 +96,7 @@ import os
 import time
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import cv2
 from ultralytics import YOLO
 from dotenv import load_dotenv
@@ -184,6 +184,13 @@ POS_FILE = os.getenv("POS_FILE", os.path.join(BASE_DIR, "posicion_actual.json"))
 # tener que tocar código: basta con fijar VIDEOS_DIR/FOTOS_DIR en el .env.
 VIDEOS_DIR = os.getenv("VIDEOS_DIR", os.path.join(BASE_DIR, "results", "videos"))
 FOTOS_DIR = os.getenv("FOTOS_DIR", os.path.join(BASE_DIR, "results", "fotos"))
+# Los ficheros se escriben primero en una subcarpeta 'en_curso' y solo se
+# mueven a VIDEOS_DIR/FOTOS_DIR cuando están COMPLETOS (os.replace es atómico
+# dentro del mismo disco). Así, lo que hay en VIDEOS_DIR/FOTOS_DIR está
+# siempre terminado, y una sincronización (rsync) que excluya 'en_curso/'
+# nunca puede subir ni borrar un vídeo que se está grabando.
+VIDEOS_EN_CURSO = os.path.join(VIDEOS_DIR, "en_curso")
+FOTOS_EN_CURSO = os.path.join(FOTOS_DIR, "en_curso")
 
 TOPIC = f"dronsar/{DRON_ID}/{DOMINIO}"
 CLIENT_ID = f"{DRON_ID}-{DOMINIO}"
@@ -312,6 +319,13 @@ if not fps_original or fps_original <= 1:
     fps_original = 20.0
     print(f"Aviso: la fuente no informa un FPS valido; se usa {fps_original} por defecto.")
 
+# FPS del vídeo que se GRABA: se escribe un fotograma por cada fotograma
+# analizado (1 de cada VID_STRIDE), así que el fichero va a fps_original /
+# VID_STRIDE. Si la inferencia no llega a ese ritmo, el vídeo dura MENOS que la
+# sesión real: por eso las posiciones dentro del fichero (tiempo_en_video_s,
+# duracion_fichero_s) se calculan por número de fotograma, no por el reloj.
+FPS_VIDEO = fps_original / VID_STRIDE
+
 
 # =====================================================================
 #  BUFFER LOCAL + CLIENTE MQTT  (solo si MQTT_ON)
@@ -319,7 +333,10 @@ if not fps_original or fps_original <= 1:
 if MQTT_ON:
     # El mensaje de detección tiene objetos anidados (caja, resolucion,
     # dron), así que se guarda el JSON completo en una columna 'payload'.
-    db = sqlite3.connect(DB)
+    # timeout=60: si limpia.py está compactando la base de datos (VACUUM la
+    # bloquea entera), se espera hasta 60 s en vez de fallar a los 5 s por
+    # defecto con "database is locked" y tumbar el proceso.
+    db = sqlite3.connect(DB, timeout=60)
     db.execute("""CREATE TABLE IF NOT EXISTS lecturas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT,
@@ -452,6 +469,41 @@ def _dibujar_overlay(frame, pos, ts):
     return frame
 
 
+def _tamano_fichero(ruta):
+    """Tamaño en bytes de un fichero, o None si no existe o no se puede leer."""
+    try:
+        return os.path.getsize(ruta)
+    except OSError:
+        return None
+
+
+def _publicar_video(ruta_en_curso, ruta_final):
+    """Mueve el vídeo ya cerrado de en_curso/ a VIDEOS_DIR (atómico).
+
+    Se llama siempre DESPUÉS de writer.release(): hasta entonces el .mp4 no
+    está completo (le falta el índice final y no se podría reproducir).
+    """
+    if ruta_en_curso and os.path.exists(ruta_en_curso):
+        os.replace(ruta_en_curso, ruta_final)
+
+
+def _avisar_huerfanos():
+    """Avisa de ficheros que quedaron en en_curso/ por una parada brusca.
+
+    Si el proceso se cae (o se corta la alimentación) a mitad de una
+    grabación, el vídeo se queda en en_curso/ sin cerrar: normalmente no es
+    reproducible y NO se sincroniza. No se borra automáticamente, para poder
+    revisarlo a mano si hiciera falta.
+    """
+    for carpeta in (VIDEOS_EN_CURSO, FOTOS_EN_CURSO):
+        if os.path.isdir(carpeta):
+            huerfanos = sorted(os.listdir(carpeta))
+            if huerfanos:
+                print(f"Aviso: {len(huerfanos)} fichero(s) sin terminar en {carpeta} "
+                      f"(de una parada brusca anterior): {', '.join(huerfanos[:5])}"
+                      f"{' ...' if len(huerfanos) > 5 else ''}")
+
+
 def guardar_foto(frame, pos, ts):
     """Guarda el frame donde se ha detectado una persona.
 
@@ -464,9 +516,12 @@ def guardar_foto(frame, pos, ts):
     """
     if args.overlay:
         frame = _dibujar_overlay(frame, pos, ts)
-    os.makedirs(FOTOS_DIR, exist_ok=True)
+    os.makedirs(FOTOS_EN_CURSO, exist_ok=True)
     nombre = f"{DRON_ID or 'sindron'}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-    cv2.imwrite(os.path.join(FOTOS_DIR, nombre), frame)
+    ruta_en_curso = os.path.join(FOTOS_EN_CURSO, nombre)
+    # Se escribe en en_curso/ y se mueve a FOTOS_DIR ya completa (ver arriba).
+    if cv2.imwrite(ruta_en_curso, frame):
+        os.replace(ruta_en_curso, os.path.join(FOTOS_DIR, nombre))
     return nombre
 
 
@@ -491,7 +546,8 @@ def reenviar():
             break
 
 
-def procesar_detecciones(r, foto_nombre, ts, pos):
+def procesar_detecciones(r, foto_nombre, ts, pos, foto_bytes=None, tiempo_en_video_s=None,
+                         video_fichero=None):
     """Convierte las cajas detectadas en un frame en alertas y las encola.
 
     Emite una alerta por persona, todas con el mismo 'foto' y la misma
@@ -525,7 +581,7 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
     confianzas = r.boxes.conf.cpu().numpy()    # [N]
 
     confianzas_encoladas = []
-    for (cx, cy, w, h), conf in zip(cajas, confianzas):
+    for i, ((cx, cy, w, h), conf) in enumerate(zip(cajas, confianzas)):
         conf_redondeada = round(float(conf), 2)
         mensaje = {
             "confianza": conf_redondeada,
@@ -536,9 +592,21 @@ def procesar_detecciones(r, foto_nombre, ts, pos):
             "dron": dron,
             # Nombre del JPEG guardado en results/fotos/ con este frame.
             "foto": foto_nombre,
-            "timestamp": ts_iso,
+            # Tamaño de esa foto en bytes (para estimar el consumo de disco).
+            "tamano_bytes": foto_bytes,
+            # Vídeo de la sesión en el que está este frame (mismo nombre que
+            # video.fichero del resumen) y segundo en que aparece dentro de él:
+            # juntos permiten abrir ese vídeo y saltar directamente al instante.
+            "video_fichero": video_fichero,
+            "tiempo_en_video_s": tiempo_en_video_s,
+            # InfluxDB identifica un punto por measurement + tags (dron_id) +
+            # timestamp: con varias personas en el mismo fotograma y el mismo
+            # timestamp, cada alerta SOBRESCRIBIRÍA a la anterior y solo quedaría
+            # la última. Se desplaza 1 µs por persona (+0, +1, +2 µs...) para que
+            # cada una sea un punto distinto; la diferencia es imperceptible.
+            "timestamp": (ts + timedelta(microseconds=i)).isoformat() if i else ts_iso,
         }
-        guardar_deteccion(ts_iso, json.dumps(mensaje))
+        guardar_deteccion(mensaje["timestamp"], json.dumps(mensaje))
         confianzas_encoladas.append(conf_redondeada)
     return confianzas_encoladas
 
@@ -556,7 +624,9 @@ def _percentil(valores, p):
 
 
 def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias_ms,
-                            alertas_total, confianzas_alertas):
+                            alertas_total, confianzas_alertas,
+                            tamano_bytes=None, duracion_fichero_s=None,
+                            foto_representativa=None, confianza_maxima=None):
     """Publica el resumen de una sesión de grabación que acaba de terminar.
 
     Formato acordado con el tutor, topic dronsar/{dron_id}/video/resumen.
@@ -579,8 +649,14 @@ def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias
         "dron_id": DRON_ID,
         "video": {
             "fichero": fichero_video,
+            # Duración de la SESIÓN (reloj: de start_recording a stop_recording).
             "duracion_segundos": round((fin - inicio).total_seconds(), 1),
+            # Duración del FICHERO grabado (frames / FPS del vídeo). Es menor que
+            # la de la sesión si la inferencia no mantiene el ritmo del vídeo.
+            "duracion_fichero_s": duracion_fichero_s,
             "frames_totales": frames_totales,
+            # Tamaño del .mp4 en bytes (para estimar el consumo de disco).
+            "tamano_bytes": tamano_bytes,
         },
         "rendimiento": {
             "runtime": args.runtime,
@@ -592,6 +668,10 @@ def publicar_resumen_video(fichero_video, inicio, fin, frames_totales, latencias
         "detecciones": {
             "total_alertas_emitidas": alertas_total,
             "confianza_media": confianza_media,
+            # Alerta de mayor confianza de la sesión (None si no hubo ninguna):
+            # su foto sirve de imagen representativa del vídeo en el servidor.
+            "confianza_maxima": confianza_maxima,
+            "foto_representativa": foto_representativa,
         },
         "timestamp_inicio": inicio.isoformat(),
         "timestamp_fin": fin.isoformat(),
@@ -618,6 +698,8 @@ ESPERA_COMANDO = MQTT_ON and args.camera is not None
 grabando = not ESPERA_COMANDO
 if ESPERA_COMANDO:
     print(f"A la espera de 'start_recording' desde el panel (topic '{CONFIG_TOPIC}')...")
+
+_avisar_huerfanos()
 
 ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam (persiste entre sesiones)
 parar_por_usuario = False   # se puso a True al pulsar 'q' en el preview: para todo, no solo la sesion
@@ -664,19 +746,24 @@ try:
         # Con zona horaria (igual que el resto de timestamps del script) para
         # que timestamp_inicio del resumen sea comparable a timestamp_fin.
         FECHA_INICIO = datetime.now().astimezone()
-        os.makedirs(VIDEOS_DIR, exist_ok=True)
+        os.makedirs(VIDEOS_EN_CURSO, exist_ok=True)
         fecha_str = FECHA_INICIO.strftime('%Y%m%d_%H%M%S')
         # Nombre fijado ya aquí (no al escribir el primer frame): así el
         # resumen de la sesión tiene un nombre de fichero aunque no se haya
         # detectado/escrito ni un solo frame (sesión cortada casi al instante).
         nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
-        output_path = os.path.join(VIDEOS_DIR, nombre_video)
+        output_path = os.path.join(VIDEOS_DIR, nombre_video)            # destino final (completo)
+        output_en_curso = os.path.join(VIDEOS_EN_CURSO, nombre_video)   # mientras se graba
 
         # ------------------- BENCHMARK: contadores de esta sesión -------------------
         tiempos_inferencia = []
         t_anterior = time.perf_counter()
         alertas_sesion = 0        # total de alertas MQTT encoladas en esta sesión
         confianzas_sesion = []    # confianza de cada una de esas alertas
+        # Foto de la alerta con MAYOR confianza de la sesión: se envía en el
+        # resumen para que el servidor use su miniatura como imagen del vídeo.
+        foto_representativa = None
+        confianza_maxima = None
 
         for r in results:
             # Medir tiempo del fotograma procesado
@@ -695,9 +782,9 @@ try:
             if writer is None:
                 h, w = annotated_frame.shape[:2]
                 writer = cv2.VideoWriter(
-                    output_path,
+                    output_en_curso,
                     cv2.VideoWriter_fourcc(*'mp4v'),
-                    fps_original / VID_STRIDE,
+                    FPS_VIDEO,
                     (w, h),
                 )
                 # Arrancamos el emisor en directo a la vez que el vídeo local,
@@ -724,9 +811,18 @@ try:
                         print("\n  (aviso: sin posicion_actual.json; la alerta va SIN coordenadas. "
                               "¿Está vuelo.py en marcha en la misma carpeta?)")
                     foto_nombre = guardar_foto(annotated_frame, pos, ts)
-                    confs = procesar_detecciones(r, foto_nombre, ts, pos)
+                    foto_bytes = _tamano_fichero(os.path.join(FOTOS_DIR, foto_nombre))
+                    # Este frame es el nº len(tiempos_inferencia) escrito en el
+                    # vídeo (ya se ha hecho writer.write), así que su posición
+                    # en el fichero es (n - 1) / FPS_VIDEO segundos.
+                    tiempo_en_video_s = round((len(tiempos_inferencia) - 1) / FPS_VIDEO, 2)
+                    confs = procesar_detecciones(r, foto_nombre, ts, pos,
+                                                 foto_bytes, tiempo_en_video_s, nombre_video)
                     alertas_sesion += len(confs)
                     confianzas_sesion.extend(confs)
+                    if confs and (confianza_maxima is None or max(confs) > confianza_maxima):
+                        confianza_maxima = max(confs)
+                        foto_representativa = foto_nombre
                     ultimo_envio = ahora
             # Se intenta vaciar el buffer en cada frame (barato si está vacío).
             if MQTT_ON:
@@ -756,6 +852,9 @@ try:
         if writer is not None:
             writer.release()
             writer = None
+            # Vídeo ya cerrado y completo: se mueve a VIDEOS_DIR ANTES de medir
+            # su tamaño y de publicar el resumen.
+            _publicar_video(output_en_curso, output_path)
         # Cerramos el emisor en directo de esta sesión (si estaba activo).
         if STREAM_ON and emisor is not None:
             emisor.cerrar()
@@ -805,6 +904,12 @@ try:
                 latencias_ms=latencias_ms,
                 alertas_total=alertas_sesion,
                 confianzas_alertas=confianzas_sesion,
+                # El writer ya se ha cerrado arriba: el .mp4 está completo en disco.
+                tamano_bytes=_tamano_fichero(output_path),
+                foto_representativa=foto_representativa,
+                confianza_maxima=confianza_maxima,
+                duracion_fichero_s=(round(len(tiempos_inferencia) / FPS_VIDEO, 1)
+                                    if tiempos_inferencia else None),
             )
 
         if not ESPERA_COMANDO:
@@ -822,6 +927,8 @@ finally:
     # Cierre ordenado (también si se interrumpe con Ctrl+C a media sesión).
     if writer is not None:
         writer.release()
+        # Cierre ordenado a mitad de sesión: el vídeo queda completo, se publica.
+        _publicar_video(output_en_curso, output_path)
     if STREAM_ON and emisor is not None:
         emisor.cerrar()
     cv2.destroyAllWindows()

@@ -1,0 +1,31 @@
+// Destino: Loki en la EC2, a través de Tailscale
+loki.write "ec2" {
+  endpoint {
+    url = "http://100.115.241.57:3100/loki/api/v1/push"
+  }
+}
+
+// Convierte el nombre del servicio systemd en la etiqueta "unit"
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+// Lee el journal de systemd de la Pi
+loki.source.journal "servicios" {
+  forward_to    = [loki.write.ec2.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  max_age       = "12h"
+  labels        = {
+    host     = "raspberry",
+    drone_id = "dron-01",
+  }
+}
