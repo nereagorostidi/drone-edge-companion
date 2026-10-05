@@ -12,14 +12,16 @@ Environment=PYTHONUNBUFFERED=1
 # esperando 'start_recording' del panel (ver README). Para procesar un
 # video de fichero en su lugar, sustituir "--camera 0" por su ruta.
 # --preview false es obligatorio aqui: no hay pantalla en un servicio systemd.
-# --runtime ncnn: motor mas ligero/rapido para la CPU ARM de la Pi. Requiere
-# haber generado antes weights/best_ncnn_model/ con conversion/exportar_ncnn.py
-# (si no existe, el servicio falla al arrancar con un aviso claro).
+# --runtime hef: inferencia en el acelerador Hailo-8 del AI Kit (el motor mas
+# rapido: ~34 ms/frame frente a ~120 ms de NCNN en la CPU). Requiere el Hailo
+# conectado, HailoRT instalado y weights/best_hailo_model/ (si falta algo de
+# eso, el servicio falla al arrancar con un aviso claro y systemd lo reintenta).
+# Para volver a la CPU: sustituir por "--runtime ncnn".
 # Graba tambien una copia sin detecciones (_raw.mp4); si en vuelo baja
 # demasiado el rendimiento, anadir "--raw false" al final del ExecStart.
 # No pasar --conf aqui: el umbral se fija desde el panel (set_confidence) y
 # se guarda en ~/.config/deteccion/confianza.json; --conf lo anularia.
-ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false --runtime ncnn
+ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false --runtime hef
 Restart=always
 RestartSec=10
 
