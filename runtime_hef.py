@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 from contextlib import ExitStack
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -123,8 +124,13 @@ class _DummyDataset:
 
 
 class _DummyPredictor:
+    """Imita model.predictor de Ultralytics: .dataset (para cerrar la camara)
+    y .args.conf (umbral que deteccion.py cambia en caliente y que predict()
+    relee en cada frame, igual que el postproceso de Ultralytics)."""
+
     def __init__(self):
         self.dataset = _DummyDataset()
+        self.args = SimpleNamespace(conf=0.25)
 
 
 # ------------------------------------------------------------------
@@ -270,6 +276,7 @@ class HailoYolo:
         if not cap.isOpened():
             raise RuntimeError(f"No se pudo abrir la fuente para Hailo: {source!r}")
         self.predictor.dataset.cap = cap
+        self.predictor.args.conf = float(conf)
         idx = 0
         try:
             while True:
@@ -277,7 +284,8 @@ class HailoYolo:
                 if not ok:
                     break
                 if idx % max(1, int(vid_stride)) == 0:
-                    yield self._infer_frame(frame, float(conf))
+                    # Se relee en cada frame: deteccion.py puede cambiarlo en caliente.
+                    yield self._infer_frame(frame, float(self.predictor.args.conf))
                 idx += 1
         finally:
             cap.release()

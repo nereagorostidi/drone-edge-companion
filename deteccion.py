@@ -44,6 +44,9 @@ con --preview true). El vídeo anotado de salida se genera igual, se
 muestre o no el preview, en (VIDEOS_DIR configurable por .env, por
 defecto results/videos):
     {VIDEOS_DIR}/{dron_id}_{video}_{fecha}.mp4
+Con --raw (por defecto true) se graba además, a la vez y con el mismo
+códec/FPS/resolución, una copia SIN detecciones dibujadas:
+    {VIDEOS_DIR}/{dron_id}_{video}_{fecha}_raw.mp4
 
 Cada vez que se envía una alerta (respetando el --anti-spam) se guarda
 además el frame anotado de esa detección como JPEG en (FOTOS_DIR
@@ -76,6 +79,7 @@ Uso:
     python3 deteccion.py --camera /dev/video0        # cámara en vivo por ruta de dispositivo (Raspberry Pi)
     python3 deteccion.py --camera 0 --preview true   # cámara en vivo, con ventana (NO usar en systemd)
     python3 deteccion.py vuelo1.mp4 --overlay false  # fotos sin coordenadas/fecha superpuestas
+    python3 deteccion.py vuelo1.mp4 --raw false      # sin la copia _raw.mp4 (solo el vídeo anotado)
     python3 deteccion.py vuelo1.mp4 --runtime onnx   # carga weights/best.onnx (mas ligero, requiere conversion/exportar_onnx.py antes)
     python3 deteccion.py vuelo1.mp4 --runtime onnx-int8  # carga weights/best.int8.onnx (cuantizado, requiere conversion/cuantizar_onnx.py antes)
     python3 deteccion.py vuelo1.mp4 --runtime ncnn   # carga weights/best_ncnn_model/ (requiere conversion/exportar_ncnn.py antes)
@@ -89,6 +93,8 @@ Variables de entorno (.env) — necesarias solo con --mqtt true:
     BUFFER_DB   ruta del buffer SQLite (por defecto: deteccion.db)
     POS_FILE    ruta del posicion_actual.json (compartido con vuelo.py)
     LOTE        filas enviadas por ciclo (por defecto 50)
+    CONF_FILE   fichero donde se guarda el umbral de confianza fijado desde el
+                panel (por defecto ~/.config/deteccion/confianza.json)
 """
 
 import argparse
@@ -96,6 +102,7 @@ import os
 import time
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 import cv2
 from ultralytics import YOLO
@@ -131,8 +138,10 @@ parser.add_argument('video_path', nargs='?', default=None,
 parser.add_argument('--camera', type=_fuente_camara, default=None, metavar='INDICE_O_RUTA',
                      help="Analizar en vivo desde una camara en vez de un fichero: indice (0, 1...) "
                           "o ruta de dispositivo (/dev/video0). No se puede combinar con video_path")
-parser.add_argument('--conf', type=float, default=0.5,
-                     help='Confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)')
+parser.add_argument('--conf', type=float, default=None,
+                     help='Confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar). '
+                          'Si se omite, se usa la guardada desde el panel (CONF_FILE) o, si no hay, 0.5. '
+                          'Si se pasa, manda sobre la guardada en esta ejecucion (sin sobrescribirla)')
 parser.add_argument('--vid-stride', type=int, default=2,
                      help='Analiza 1 de cada N frames (1 = analiza todos; subirlo va mas rapido pero puede saltarse personas que pasan rapido)')
 parser.add_argument('--augment', action=argparse.BooleanOptionalAction, default=True,
@@ -147,6 +156,9 @@ parser.add_argument('--overlay', type=_str2bool, default=True,
                      help='Añadir a la foto guardada (results/fotos/) la posicion del dron y la fecha/hora de la deteccion (true/false). No afecta al video anotado ni al preview')
 parser.add_argument('--stream', type=_str2bool, default=True,
                      help='Emitir el vídeo anotado en directo hacia MediaMTX (true/false), en paralelo a la grabación local')
+parser.add_argument('--raw', type=_str2bool, default=True,
+                     help='Grabar además una copia del vídeo SIN detecciones dibujadas ({nombre}_raw.mp4, true/false). '
+                          'Desactivar con --raw false si en vuelo baja demasiado el rendimiento')
 parser.add_argument('--runtime', choices=('pt', 'onnx', 'onnx-int8', 'ncnn', 'hef'), default='pt',
                      help="Motor de inferencia: 'pt' carga weights/best.pt via PyTorch (el de siempre); "
                           "'onnx' carga weights/best.onnx via ONNX Runtime (mas ligero/rapido, requiere "
@@ -206,6 +218,84 @@ RESUMEN_TOPIC = f"dronsar/{DRON_ID}/video/resumen"
 # valor de --anti-spam, pero se puede actualizar en caliente desde el panel
 # de control (ver on_message), igual que el intervalo en sensor.py.
 anti_spam_actual = args.anti_spam
+
+# Umbral de confianza EN USO. Se puede cambiar en caliente desde el panel
+# (set_confidence, ver on_message) y se guarda en CONF_FILE para que
+# sobreviva a un reinicio del servicio. CONF_POR_DEFECTO solo se usa si no
+# hay valor guardado (o no es válido) y no se ha pasado --conf.
+CONF_POR_DEFECTO = 0.5
+CONF_FILE = os.getenv("CONF_FILE", os.path.expanduser("~/.config/deteccion/confianza.json"))
+# El callback MQTT corre en el hilo de paho y el bucle de inferencia en el
+# principal: todo acceso a _confianza_actual pasa por este lock.
+_conf_lock = threading.Lock()
+
+
+def _confianza_valida(valor):
+    """True si 'valor' es un número (no bool) entre 0 y 1, ambos incluidos."""
+    return (isinstance(valor, (int, float)) and not isinstance(valor, bool)
+            and 0.0 <= valor <= 1.0)
+
+
+def _cargar_confianza():
+    """Lee el umbral guardado en CONF_FILE; si no existe o no es válido,
+    devuelve CONF_POR_DEFECTO."""
+    try:
+        with open(CONF_FILE) as f:
+            valor = json.load(f).get("confianza")
+    except FileNotFoundError:
+        print(f"Sin umbral de confianza guardado ({CONF_FILE}); "
+              f"se usa el valor por defecto {CONF_POR_DEFECTO}.")
+        return CONF_POR_DEFECTO
+    except (json.JSONDecodeError, OSError, AttributeError) as e:
+        print(f"Aviso: no se pudo leer {CONF_FILE} ({e}); "
+              f"se usa el valor por defecto {CONF_POR_DEFECTO}.")
+        return CONF_POR_DEFECTO
+    if not _confianza_valida(valor):
+        print(f"Aviso: umbral guardado en {CONF_FILE} no válido ({valor!r}); "
+              f"se usa el valor por defecto {CONF_POR_DEFECTO}.")
+        return CONF_POR_DEFECTO
+    print(f"Umbral de confianza cargado de {CONF_FILE}: {float(valor)}")
+    return float(valor)
+
+
+def _guardar_confianza(valor):
+    """Guarda el umbral en CONF_FILE de forma atómica: se escribe un .tmp y
+    se renombra (os.replace), así nunca queda un fichero a medias."""
+    tmp = CONF_FILE + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(CONF_FILE) or ".", exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump({"confianza": valor,
+                       "actualizado": datetime.now().astimezone().isoformat()}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CONF_FILE)
+    except OSError as e:
+        print(f"  -> ERROR: no se pudo guardar el umbral en {CONF_FILE} ({e}); "
+              f"se aplica igualmente, pero se perderá al reiniciar.")
+
+
+def obtener_confianza():
+    """Umbral de confianza en uso (thread-safe)."""
+    with _conf_lock:
+        return _confianza_actual
+
+
+def fijar_confianza(nueva):
+    """Cambia el umbral en uso (thread-safe) y devuelve el anterior."""
+    global _confianza_actual
+    with _conf_lock:
+        anterior, _confianza_actual = _confianza_actual, nueva
+    return anterior
+
+
+if args.conf is not None:
+    if not _confianza_valida(args.conf):
+        raise SystemExit(f"--conf debe estar entre 0 y 1 (recibido: {args.conf}).")
+    _confianza_actual = args.conf
+    print(f"Umbral de confianza fijado por --conf: {args.conf} (no se guarda en {CONF_FILE}).")
+else:
+    _confianza_actual = _cargar_confianza()
 
 # El envío MQTT se controla con el parámetro --mqtt (por defecto true).
 # Con --mqtt false, el script solo hace detección y preview.
@@ -362,6 +452,8 @@ if MQTT_ON:
             start_recording      {}                 Arranca la grabación/detección
                                                      (ver ESPERA_COMANDO más abajo).
             stop_recording        {}                 La detiene, sin cerrar el script.
+            set_confidence       {"confidence": X}  Cambia el umbral de confianza (0-1)
+                                                     en caliente y lo guarda en CONF_FILE.
         """
         global anti_spam_actual, grabando
         try:
@@ -390,6 +482,18 @@ if MQTT_ON:
         elif command == "stop_recording":
             grabando = False
             print("  -> Grabación/detección detenida (el script sigue en marcha, a la espera)")
+
+        elif command == "set_confidence":
+            params = orden.get("params")
+            nueva = params.get("confidence") if isinstance(params, dict) else None
+            if not _confianza_valida(nueva):
+                print(f"  -> ERROR: 'params.confidence' debe ser un número entre 0 y 1 "
+                      f"(recibido: {nueva!r}); se ignora.")
+                return
+            nueva = float(nueva)
+            anterior = fijar_confianza(nueva)
+            print(f"  -> Umbral de confianza actualizado: {anterior} -> {nueva}")
+            _guardar_confianza(nueva)
 
         else:
             print(f"  -> Comando desconocido '{command}' en este topic; se ignora.")
@@ -704,6 +808,7 @@ _avisar_huerfanos()
 ultimo_envio = 0.0     # marca de tiempo del último envío, para el anti-spam (persiste entre sesiones)
 parar_por_usuario = False   # se puso a True al pulsar 'q' en el preview: para todo, no solo la sesion
 writer = None   # definido aqui para que el finally pueda cerrarlo aunque no haya arrancado ninguna sesion
+writer_raw = None   # igual que writer, para la copia sin detecciones (--raw)
 emisor = None   # emisor de streaming de la sesión en curso (como writer, pero para el directo)
 
 
@@ -731,7 +836,7 @@ try:
         results = model.predict(
             source=fuente,
             imgsz=640,       # igual que el imgsz de entrenamiento; a menos resolucion se pierde detalle y confunde mas las clases
-            conf=args.conf,        # confianza minima para mostrar una deteccion (subir = menos falsos positivos, bajar = menos personas sin detectar)
+            conf=obtener_confianza(),  # umbral al arrancar la sesion; se actualiza en cada frame dentro del bucle (set_confidence)
             classes=[0],     # solo 'persona' (indice 0); ver comentario de arriba
             vid_stride=VID_STRIDE,    # 1 = analiza todos los frames; subirlo va mas rapido pero puede saltarse personas que pasan rapido
             stream=True,
@@ -740,6 +845,7 @@ try:
         )
 
         writer = None
+        writer_raw = None
         # Fecha de realización del vídeo: se fija una vez por sesión de
         # grabación (no una sola vez para todo el proceso), para que cada
         # start_recording genere su propio fichero con su propio nombre.
@@ -754,6 +860,11 @@ try:
         nombre_video = f"{DRON_ID or 'sindron'}_{fuente_nombre}_{fecha_str}.mp4"
         output_path = os.path.join(VIDEOS_DIR, nombre_video)            # destino final (completo)
         output_en_curso = os.path.join(VIDEOS_EN_CURSO, nombre_video)   # mientras se graba
+        # Copia sin detecciones (--raw): mismo nombre con sufijo _raw y mismo
+        # flujo en_curso/ -> VIDEOS_DIR que el vídeo anotado.
+        nombre_video_raw = f"{os.path.splitext(nombre_video)[0]}_raw.mp4"
+        output_raw_path = os.path.join(VIDEOS_DIR, nombre_video_raw)
+        output_raw_en_curso = os.path.join(VIDEOS_EN_CURSO, nombre_video_raw)
 
         # ------------------- BENCHMARK: contadores de esta sesión -------------------
         tiempos_inferencia = []
@@ -766,6 +877,13 @@ try:
         confianza_maxima = None
 
         for r in results:
+            # Umbral en caliente: model.predict() solo lee 'conf' al arrancar,
+            # pero el postproceso relee predictor.args.conf en cada frame (en
+            # Ultralytics y en runtime_hef.py). Se actualiza aquí, antes de
+            # pedir el siguiente frame, para que un set_confidence recibido a
+            # media grabación se aplique desde el frame siguiente.
+            model.predictor.args.conf = obtener_confianza()
+
             # Medir tiempo del fotograma procesado
             t_ahora = time.perf_counter()
             latencia_frame = t_ahora - t_anterior
@@ -777,22 +895,39 @@ try:
             fps_actual = 1.0 / latencia_frame if latencia_frame > 0 else 0
             print(f"\r[Benchmark] Frame {len(tiempos_inferencia)}: {ms_actual:.1f} ms ({fps_actual:.1f} FPS)", end="", flush=True)
 
-            annotated_frame = r.plot()
+            # Frame tal cual sale de la cámara, sin cajas ni etiquetas. Se
+            # escribe en el vídeo raw ANTES de r.plot() (r.plot() dibuja sobre
+            # una copia, pero así no dependemos de ello).
+            frame_raw = r.orig_img
 
             if writer is None:
-                h, w = annotated_frame.shape[:2]
+                # r.plot() devuelve un frame del mismo tamaño que orig_img, así
+                # que ambos writers comparten resolución, códec y FPS.
+                h, w = frame_raw.shape[:2]
                 writer = cv2.VideoWriter(
                     output_en_curso,
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     FPS_VIDEO,
                     (w, h),
                 )
+                # El raw se abre a la vez que el anotado (y se cierra a la vez, abajo).
+                if args.raw:
+                    writer_raw = cv2.VideoWriter(
+                        output_raw_en_curso,
+                        cv2.VideoWriter_fourcc(*'mp4v'),
+                        FPS_VIDEO,
+                        (w, h),
+                    )
                 # Arrancamos el emisor en directo a la vez que el vídeo local,
                 # una sola vez por sesión (cuando se crea el writer).
                 if STREAM_ON:
                     emisor = EmisorRTSP(STREAM_HOST, STREAM_USER, STREAM_PASS,
                                         STREAM_PATH, STREAM_ANCHO, STREAM_ALTO, STREAM_FPS)
                     emisor.abrir()
+            if writer_raw is not None:
+                writer_raw.write(frame_raw)
+
+            annotated_frame = r.plot()
             writer.write(annotated_frame)
 
             # Copia ligera en directo hacia MediaMTX (si falla, no afecta a lo demás).
@@ -855,6 +990,10 @@ try:
             # Vídeo ya cerrado y completo: se mueve a VIDEOS_DIR ANTES de medir
             # su tamaño y de publicar el resumen.
             _publicar_video(output_en_curso, output_path)
+        if writer_raw is not None:
+            writer_raw.release()
+            writer_raw = None
+            _publicar_video(output_raw_en_curso, output_raw_path)
         # Cerramos el emisor en directo de esta sesión (si estaba activo).
         if STREAM_ON and emisor is not None:
             emisor.cerrar()
@@ -929,6 +1068,9 @@ finally:
         writer.release()
         # Cierre ordenado a mitad de sesión: el vídeo queda completo, se publica.
         _publicar_video(output_en_curso, output_path)
+    if writer_raw is not None:
+        writer_raw.release()
+        _publicar_video(output_raw_en_curso, output_raw_path)
     if STREAM_ON and emisor is not None:
         emisor.cerrar()
     cv2.destroyAllWindows()

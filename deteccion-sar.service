@@ -15,6 +15,10 @@ Environment=PYTHONUNBUFFERED=1
 # --runtime ncnn: motor mas ligero/rapido para la CPU ARM de la Pi. Requiere
 # haber generado antes weights/best_ncnn_model/ con conversion/exportar_ncnn.py
 # (si no existe, el servicio falla al arrancar con un aviso claro).
+# Graba tambien una copia sin detecciones (_raw.mp4); si en vuelo baja
+# demasiado el rendimiento, anadir "--raw false" al final del ExecStart.
+# No pasar --conf aqui: el umbral se fija desde el panel (set_confidence) y
+# se guarda en ~/.config/deteccion/confianza.json; --conf lo anularia.
 ExecStart=/home/nerea/drone-edge-companion/venv/bin/python -u /home/nerea/drone-edge-companion/deteccion.py --camera 0 --preview false --runtime ncnn
 Restart=always
 RestartSec=10

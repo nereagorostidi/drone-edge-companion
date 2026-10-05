@@ -41,7 +41,7 @@ Este README cubre lo esencial para arrancar y operar el nodo edge. Para temas m�
 - `dataset/` — Dataset de entrenamiento/calibración (una clase, `persona`) usado por `generate_all_formats.py`. No está en git: se copia a mano desde el dataset versionado en Roboflow que indica `dataset/data.yaml`.
 - `requirements-compile.txt`, `vendor/` — Dependencias y wheel del Dataflow Compiler de Hailo, solo para `generate_all_formats.py` (no se instalan en la Pi). Ver [docs/video.md](docs/video.md).
 - `samples/` — Vídeos de prueba para `deteccion.py`.
-- `results/videos/` — Vídeos anotados generados por `deteccion.py` (se crea automáticamente; excluida de git). Ruta por defecto, configurable con `VIDEOS_DIR` en el `.env`.
+- `results/videos/` — Vídeos anotados generados por `deteccion.py` y, con `--raw true` (por defecto), su copia sin detecciones `..._raw.mp4` (se crea automáticamente; excluida de git). Ruta por defecto, configurable con `VIDEOS_DIR` en el `.env`.
 - `results/fotos/` — Fotogramas JPEG de cada alerta enviada por `deteccion.py` (se crea automáticamente; excluida de git). Ruta por defecto, configurable con `FOTOS_DIR` en el `.env`.
 - `posicion_actual.json` — Última posición conocida del dron; la escribe `vuelo.py` y la lee `deteccion.py`. Se genera en tiempo de ejecución.
 - `sensor-sar.service` — Servicio systemd del dominio `ambiental` (`sensor.py`).
@@ -94,6 +94,7 @@ cp .env.example .env   # edita con tus credenciales
 | `POS_FILE` | `vuelo.py`, `deteccion.py` | Ruta del fichero de posición compartido (por defecto `./posicion_actual.json`) |
 | `VIDEOS_DIR` | `deteccion.py` | Carpeta donde se guardan los vídeos anotados (por defecto `results/videos`, dentro del repo). Cambiarla no requiere tocar código — útil para apuntar a almacenamiento aparte (p. ej. `/media/...`) |
 | `FOTOS_DIR` | `deteccion.py` | Carpeta donde se guardan las fotos de cada alerta (por defecto `results/fotos`, dentro del repo). Mismo caso de uso que `VIDEOS_DIR` |
+| `CONF_FILE` | `deteccion.py` | Fichero donde se guarda el umbral de confianza fijado desde el panel (`set_confidence`), para que sobreviva a un reinicio (por defecto `~/.config/deteccion/confianza.json`). Sin él, o si no es válido, se usa `0.5` — ver [docs/video.md](docs/video.md#umbral-de-confianza) |
 | `MAVLINK_MODE` | `receptor.py`, `vuelo.py` | `sitl` (por defecto) o `real`. Selecciona qué par de variables de conexión de abajo se usa — ver [docs/mavlink.md](docs/mavlink.md) |
 | `MAVLINK_CONN` | `receptor.py` | Cadena de conexión MAVLink en modo `sitl` (por defecto `udpin:127.0.0.1:14550`; debe ser un puerto distinto al de `MAVLINK_CONN_VUELO`) |
 | `MAVLINK_CONN_VUELO` | `vuelo.py` | Cadena de conexión MAVLink en modo `sitl` (por defecto `udpin:0.0.0.0:14552`; debe ser un puerto distinto al de `MAVLINK_CONN`). No se usa con `--fake` |

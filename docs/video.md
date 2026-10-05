@@ -14,7 +14,7 @@ python deteccion.py samples/vuelo1.mp4 --mqtt false       # solo detección + v�
 python deteccion.py samples/vuelo1.mp4 --preview true     # con ventana de vista previa; el vídeo en results/videos/ se genera igual
 python deteccion.py -h                                    # todas las opciones (--conf, --vid-stride, --anti-spam...)
 ```
-El vídeo anotado de cada sesión se guarda en `{VIDEOS_DIR}/{DRON_ID}_{fuente}_{fecha}.mp4` — por defecto `results/videos/`, configurable con `VIDEOS_DIR` en el `.env` (ver [Variables de entorno](../README.md#variables-de-entorno)) sin tocar código (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `{FOTOS_DIR}/{DRON_ID}_{fecha}.jpg` (por defecto `results/fotos/`, configurable con `FOTOS_DIR`), cuyo nombre viaja en el campo `foto` del JSON de la alerta.
+El vídeo anotado de cada sesión se guarda en `{VIDEOS_DIR}/{DRON_ID}_{fuente}_{fecha}.mp4` (y, con `--raw true`, una copia sin detecciones en `..._raw.mp4`, ver [Vídeo sin detecciones](#vídeo-sin-detecciones---raw)) — por defecto `results/videos/`, configurable con `VIDEOS_DIR` en el `.env` (ver [Variables de entorno](../README.md#variables-de-entorno)) sin tocar código (con un vídeo de fichero, o con `--camera` y `--mqtt false`, se genera siempre, de principio a fin de la ejecución; con `--camera` y `--mqtt true` ver [Arranque y parada remota](#arranque-y-parada-remota-de-deteccionpy)). Cada alerta enviada (con `--mqtt true`, respetando el `--anti-spam`) guarda además una foto del frame en `{FOTOS_DIR}/{DRON_ID}_{fecha}.jpg` (por defecto `results/fotos/`, configurable con `FOTOS_DIR`), cuyo nombre viaja en el campo `foto` del JSON de la alerta.
 
 Para que las alertas lleven posición, `vuelo.py` debe estar en marcha en la misma carpeta (comparten `posicion_actual.json`); si no lo está, la alerta se envía igualmente pero sin coordenadas.
 
@@ -22,6 +22,28 @@ Por defecto (`--overlay true`) esa foto lleva superpuestas las coordenadas del d
 ```bash
 python deteccion.py samples/vuelo1.mp4 --overlay false   # fotos sin coordenadas/fecha superpuestas
 ```
+
+## Umbral de confianza
+Solo se dibujan y se envían como alerta las detecciones con confianza igual o superior al umbral. El valor con el que arranca `deteccion.py` se decide así, por orden:
+1. `--conf X` si se pasa por línea de comandos (vale solo para esa ejecución y **no** se guarda; útil para pruebas con vídeos).
+2. El último valor fijado desde el panel, guardado en `CONF_FILE` (por defecto `~/.config/deteccion/confianza.json`; en la Pi, con el servicio corriendo como `nerea`, `/home/nerea/.config/deteccion/confianza.json`).
+3. Si ese fichero no existe o no es válido, `0.5`.
+
+El log del arranque indica cuál se ha usado (`Umbral de confianza cargado de ...` o `Sin umbral de confianza guardado ...; se usa el valor por defecto 0.5`).
+
+Desde el panel se cambia con el comando `set_confidence` (ver [Flujo de configuración](flujos.md#flujo-de-configuración)): se aplica en caliente desde el frame siguiente, también a mitad de una grabación y con cualquier `--runtime`, y se guarda en `CONF_FILE` (escribiendo un `.tmp` y renombrándolo, para no dejarlo nunca a medias). Cada cambio queda en el log con el valor anterior y el nuevo:
+```
+  -> Umbral de confianza actualizado: 0.5 -> 0.6
+```
+
+## Vídeo sin detecciones (`--raw`)
+Por defecto (`--raw true`) cada sesión graba, además del vídeo anotado, una copia con los frames tal cual salen de la cámara, sin cajas ni etiquetas: mismo nombre con el sufijo `_raw` (`dron-01_camara0_20261003_194550.mp4` → `dron-01_camara0_20261003_194550_raw.mp4`), mismo códec, FPS y resolución, y se abre y se cierra a la vez que el anotado. Igual que él, se graba en `{VIDEOS_DIR}/en_curso/` y solo se mueve a `{VIDEOS_DIR}` cuando está cerrado, así que la sincronización (que excluye `en_curso/`) nunca se lleva un vídeo a medias.
+
+Duplica el espacio en disco y lo que se sincroniza, y añade la codificación de un segundo vídeo por CPU. Si en vuelo baja demasiado el rendimiento, se desactiva con `--raw false`:
+```bash
+python deteccion.py samples/vuelo1.mp4 --raw false   # solo el vídeo anotado
+```
+Para medir el impacto, procesar el mismo vídeo con el mismo `--runtime` con `--raw false` y `--raw true` y comparar `Latencia media por frame` / `Rendimiento medio` del resumen que se imprime al final (incluye el tiempo de escritura de los vídeos), o `rendimiento.fps_medio` y `latencia_p95_ms` del resumen MQTT de cada sesión. El resumen MQTT (`video/resumen`) solo describe el vídeo anotado; el `_raw` no lleva resumen propio.
 
 ## Streaming en directo
 Por defecto (`--stream true`) se emite además el vídeo anotado en directo hacia MediaMTX (`streaming.py`, vía `ffmpeg`, RTSP), en paralelo a la grabación local — más ligero (por defecto 640×360 a 12 FPS, configurable con `STREAM_ANCHO`/`STREAM_ALTO`/`STREAM_FPS`) que el vídeo guardado en `results/videos/`. Es un extra a prueba de fallos: si falta `ffmpeg`, faltan `STREAM_HOST`/`STREAM_USER`/`STREAM_PASS` en el `.env`, o se cae la conexión a mitad de sesión, se desactiva solo con un aviso por consola y la detección (vídeo local + alertas MQTT) sigue sin cortarse:
@@ -78,7 +100,7 @@ Con `--camera` **y** `--mqtt true` (el caso real: el servicio systemd), `detecci
 python deteccion.py --camera 0
 # -> "A la espera de 'start_recording' desde el panel (topic 'dronsar/dron-02/deteccion/config')..."
 ```
-Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT, y streaming en directo si `--stream` está activado); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión en `results/videos/` con su propio timestamp y cortando el streaming— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
+Al recibir `start_recording` arranca la sesión completa (vídeo anotado, preview si está activado, detección y alertas MQTT, y streaming en directo si `--stream` está activado); al recibir `stop_recording` la cierra —guardando el vídeo de esa sesión (y su `_raw`, si `--raw` está activado) en `results/videos/` con su propio timestamp y cortando el streaming— **sin cerrar el script**, que vuelve a quedarse a la espera del siguiente `start_recording`. Se pueden encadenar tantas sesiones como se quiera sin reiniciar el proceso.
 
 Con un fichero de vídeo, o con `--mqtt false`, no hay nada que esperar: `deteccion.py` arranca directo, como siempre (estos comandos no tienen efecto en ese caso).
 

@@ -72,5 +72,6 @@ Además de comandos de vuelo, el panel de control puede reconfigurar en caliente
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `set_video_throttle` | `{"throttle_ms": N}` | Cambia el anti-spam de alertas de vídeo (el valor llega en milisegundos y se convierte a segundos) |
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `start_recording` | `{}` | Arranca la sesión de grabación/detección (solo tiene efecto con `--camera` y `--mqtt true`; ver [Arranque y parada remota](video.md#arranque-y-parada-remota-de-deteccionpy)) |
 | `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `stop_recording` | `{}` | Detiene la sesión en curso (guarda el vídeo) sin cerrar el script, que vuelve a esperar el siguiente `start_recording` |
+| `deteccion` | `deteccion.py` | `dronsar/{dron_id}/deteccion/config` | `set_confidence` | `{"confidence": X}` | Cambia el umbral de confianza mínima de las detecciones (número entre 0 y 1; si no lo es, se ignora y se registra el error). Se aplica desde el frame siguiente, también a mitad de una grabación, y se guarda en `CONF_FILE` para que sobreviva a un reinicio del servicio (ver [Umbral de confianza](video.md#umbral-de-confianza)) |
 | `sistema` | `sistema.py` | `dronsar/{dron_id}/sistema/config` | `shutdown` | `{}` | Apaga la Raspberry Pi (`sudo shutdown -h now`) |
 
